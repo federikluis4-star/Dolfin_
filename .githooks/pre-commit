@@ -1,0 +1,30 @@
+#!/usr/bin/env sh
+set -eu
+
+STAGED="$(git diff --cached --name-only)"
+[ -z "$STAGED" ] && exit 0
+
+needs_chrono=0
+for f in $STAGED; do
+  case "$f" in
+    *.py|*.js|*.ts|*.tsx|*.go|*.java|*.rb|*.php|*.sh|Dockerfile|Makefile)
+      needs_chrono=1
+      ;;
+  esac
+done
+
+if [ "$needs_chrono" -eq 1 ]; then
+  echo "$STAGED" | grep -qx 'docs/PROJECT_CHRONOLOGY.md' || {
+    echo "ERROR: code changes detected but docs/PROJECT_CHRONOLOGY.md is not staged."
+    echo "Please update project chronology before commit."
+    exit 1
+  }
+fi
+
+# Block accidental secrets in tracked files
+if echo "$STAGED" | grep -Eq '(^|/)\.env($|\.)'; then
+  echo "ERROR: .env file appears in staged changes. Remove secrets from commit."
+  exit 1
+fi
+
+exit 0

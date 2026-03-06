@@ -1,0 +1,14 @@
+Summary: <short imperative title>
+
+What changed:
+- 
+
+Why:
+- 
+
+Docs updated:
+- [ ] docs/PROJECT_CHRONOLOGY.md
+- [ ] docs/ERROR_LOG.md (if fix/bug/error)
+
+Risks / notes:
+- 

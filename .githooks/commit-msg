@@ -1,0 +1,15 @@
+#!/usr/bin/env sh
+set -eu
+
+MSG_FILE="$1"
+MSG="$(tr '[:upper:]' '[:lower:]' < "$MSG_FILE")"
+STAGED="$(git diff --cached --name-only)"
+
+if echo "$MSG" | grep -Eq '(fix|bug|error|incident|hotfix|regression)'; then
+  echo "$STAGED" | grep -qx 'docs/ERROR_LOG.md' || {
+    echo "ERROR: fix/bug/error commit requires docs/ERROR_LOG.md update."
+    exit 1
+  }
+fi
+
+exit 0

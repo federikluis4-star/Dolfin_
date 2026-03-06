@@ -1,0 +1,45 @@
+#!/usr/bin/env sh
+set -eu
+
+# Determine comparison range
+if git rev-parse --abbrev-ref --symbolic-full-name '@{u}' >/dev/null 2>&1; then
+  RANGE="@{u}..HEAD"
+else
+  RANGE="HEAD"
+fi
+
+CHANGED="$(git diff --name-only "$RANGE" || true)"
+[ -z "$CHANGED" ] && exit 0
+
+code_changed=0
+for f in $CHANGED; do
+  case "$f" in
+    *.py|*.js|*.ts|*.tsx|*.go|*.java|*.rb|*.php|*.sh|Dockerfile|Makefile)
+      code_changed=1
+      ;;
+  esac
+done
+
+if [ "$code_changed" -eq 1 ]; then
+  echo "$CHANGED" | grep -qx 'docs/PROJECT_CHRONOLOGY.md' || {
+    echo "ERROR: pushing code changes without docs/PROJECT_CHRONOLOGY.md updates in push range."
+    exit 1
+  }
+fi
+
+# If any commit message in range suggests fixes, require error log update in range.
+COMMITS="$(git log --format=%s "$RANGE" || true)"
+if echo "$COMMITS" | tr '[:upper:]' '[:lower:]' | grep -Eq '(fix|bug|error|incident|hotfix|regression)'; then
+  echo "$CHANGED" | grep -qx 'docs/ERROR_LOG.md' || {
+    echo "ERROR: fix-like commits detected in push range but docs/ERROR_LOG.md not updated."
+    exit 1
+  }
+fi
+
+# Prevent pushing tracked env secrets
+if echo "$CHANGED" | grep -Eq '(^|/)\.env($|\.)'; then
+  echo "ERROR: push includes .env-related tracked files."
+  exit 1
+fi
+
+exit 0

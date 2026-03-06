@@ -24,6 +24,20 @@ Use one entry per significant work block.
   - Lenovo widget behavior is dynamic and can vary by render timing.
   - Fully deterministic opening still depends on page state and runtime timing.
 
+## 2026-03-06
+- Scope: Repository-wide guardrails for any model/agent/human contributor.
+- Actions:
+  - Added mandatory repository policy file (`AGENTS.md`).
+  - Added git hooks (`pre-commit`, `commit-msg`, `pre-push`) in `.githooks/`.
+  - Added commit message template (`.gitmessage.txt`).
+  - Added PR template (`.github/pull_request_template.md`).
+  - Updated README with guardrails section and enforced workflow details.
+  - Configured local repo hooks path and commit template.
+- Result:
+  - Any contributor/model is constrained by the same commit/push documentation rules.
+- Issues/Notes:
+  - Hook enforcement is local to repository clone; each clone must keep hooks enabled.
+
 ## 2026-03-05
 - Scope: Environment/config and project baseline docs.
 - Actions:

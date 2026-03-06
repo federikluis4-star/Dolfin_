@@ -112,3 +112,17 @@ python bot.py
 - [`docs/ERROR_LOG.md`](docs/ERROR_LOG.md) — если были ошибки/регрессии
 
 Это обязательное правило проекта.
+
+---
+
+## 🛡️ Guardrails (обязательно)
+
+В репозитории включены автоматические проверки:
+- `AGENTS.md` — базовые правила для любого агента/разработчика.
+- `.githooks/pre-commit` — блокирует commit кода без обновления `docs/PROJECT_CHRONOLOGY.md`.
+- `.githooks/commit-msg` — для `fix/bug/error` требует обновить `docs/ERROR_LOG.md`.
+- `.githooks/pre-push` — блокирует push, если в диапазоне push нет обязательных обновлений docs.
+
+Локальная конфигурация уже выставлена:
+- `core.hooksPath=.githooks`
+- `commit.template=.gitmessage.txt`
