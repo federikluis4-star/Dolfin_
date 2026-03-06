@@ -101,3 +101,14 @@ python bot.py
 
 **API ошибка OpenRouter**
 → Проверь ключ `OPENROUTER_API_KEY` и лимиты на openrouter.ai
+
+---
+
+## 🧾 Документация работ
+
+Для каждого commit/push обязательно обновлять:
+- [`docs/COMMIT_PUSH_POLICY.md`](docs/COMMIT_PUSH_POLICY.md)
+- [`docs/PROJECT_CHRONOLOGY.md`](docs/PROJECT_CHRONOLOGY.md)
+- [`docs/ERROR_LOG.md`](docs/ERROR_LOG.md) — если были ошибки/регрессии
+
+Это обязательное правило проекта.
