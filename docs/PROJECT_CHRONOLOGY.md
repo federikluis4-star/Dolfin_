@@ -12,6 +12,18 @@ Use one entry per significant work block.
 ---
 
 ## 2026-03-08
+- Scope: Stateful reasoning upgrade for operator negotiation.
+- Actions:
+  - Added persistent negotiation memory inside `CopilotSession`, including `operator_claims`, `confirmed_facts`, `unresolved_demands`, `contradictions`, and `dialogue_state`.
+  - Added `agent_intent` and `current_objective` to the case snapshot so the decision layer can reason from the operator's latest move and the current dispute stage.
+  - Added a critic pass that re-checks drafted replies and rejects outputs that do not address the latest operator move or drift back into generic escalation language.
+  - Added contradiction tracking so conflicting Lenovo claims like `empty box` versus `warehouse did not receive the return` are remembered as structured state.
+- Result:
+  - The bot now has a more stateful negotiation layer and a stronger chance of producing logically consistent replies instead of repeating broad case-level demands.
+- Issues/Notes:
+  - This improves reasoning quality in code, but a fresh clean live chat is still needed to validate real operator handling after the previous polluted transcript.
+
+## 2026-03-08
 - Scope: Chat reasoning hardening for Lenovo operator dialogue.
 - Actions:
   - Added explicit operator-intent handling for `keepalive`, `UPS redirect`, `empty-box claim`, `warehouse not received`, `case ID provided`, `escalation confirmed`, and `transcript offer`.

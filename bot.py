@@ -153,6 +153,28 @@ Rules:
 - Do not repeat the previous customer-side message with light rewording.
 - End the message with one clear requested action and timeline when action is send_message."""
 
+REPLY_CRITIC_PROMPT = """You are a reply critic for a live support-chat agent.
+
+Return JSON only.
+
+Goal:
+- Check whether the drafted reply logically addresses the latest operator message.
+- Reject replies that ignore the operator's latest point, repeat the prior demand without progress, or weaken the case.
+
+JSON schema:
+{
+  "approved": true,
+  "reason": "string",
+  "fix": "string"
+}
+
+Rules:
+- `approved` must be false if the draft does not answer the latest operator move.
+- `fix` must be empty when approved is true.
+- `fix` must be a short improved replacement when approved is false.
+- Never write from the merchant's point of view.
+"""
+
 # ─── ПАРСИНГ ИМЕНИ ПРОФИЛЯ ───────────────────────────────────────────────────
 # Формат: "ИмяКлиента_Магазин" или "ИмяКлиента_Магазин_Тип"
 # Примеры: Luna_CA, Mike_Lenovo_RNR, John_Amazon_INR, Sara_Zara
@@ -474,6 +496,11 @@ class CopilotSession:
         self.last_agent_msg = ""
         self.last_sent_msg = ""
         self.last_llm_error = ""
+        self.dialogue_state = "opening"
+        self.unresolved_demands = []
+        self.confirmed_facts = []
+        self.operator_claims = []
+        self.contradictions = []
 
     def case_name(self):
         t = (self.case_type or "").upper()
@@ -564,6 +591,11 @@ Before answering, silently proofread the message for grammar and clarity."""
             "last_customer_message": self.last_sent_msg or "",
             "agent_intent": self.infer_agent_intent(self.last_agent_msg),
             "current_objective": self.current_objective(),
+            "dialogue_state": self.dialogue_state,
+            "unresolved_demands": self.unresolved_demands[-6:],
+            "confirmed_facts": self.confirmed_facts[-8:],
+            "operator_claims": self.operator_claims[-8:],
+            "contradictions": self.contradictions[-6:],
         }
 
     def record_agent_message(self, agent_text):
@@ -572,6 +604,7 @@ Before answering, silently proofread the message for grammar and clarity."""
             return
         self.last_agent_msg = agent_text
         self.transcript.append({"role": "agent", "content": agent_text})
+        self._update_case_memory(agent_text, role="agent")
 
     def should_send_message(self, message):
         normalized = self._normalize_message(message)
@@ -586,6 +619,78 @@ Before answering, silently proofread the message for grammar and clarity."""
 
     def mark_message_sent(self, message):
         self.last_sent_msg = (message or "").strip()
+        self._update_case_memory(self.last_sent_msg, role="customer_rep")
+
+    def _append_unique(self, bucket, item, limit=12):
+        item = (item or "").strip()
+        if not item:
+            return
+        normalized = self._normalize_message(item)
+        existing = [self._normalize_message(x) for x in bucket]
+        if normalized in existing:
+            return
+        bucket.append(item)
+        if len(bucket) > limit:
+            del bucket[:-limit]
+
+    def _update_case_memory(self, text, role):
+        t = (text or "").strip()
+        lowered = t.lower()
+        if not t:
+            return
+        if role == "agent":
+            self._append_unique(self.operator_claims, t)
+            if any(x in lowered for x in ["empty box", "box was empty"]):
+                self._append_unique(self.operator_claims, "Lenovo claims the returned box was empty")
+            if any(x in lowered for x in ["warehouse has not received", "not received the returned item", "not received the return"]):
+                self._append_unique(self.operator_claims, "Lenovo claims the warehouse did not receive the return")
+            if any(x in lowered for x in ["case id", "c004094813"]):
+                self._append_unique(self.confirmed_facts, "Case ID C004094813 was referenced by Lenovo")
+            if any(x in lowered for x in ["will be escalated", "escalated to the returns team"]):
+                self._append_unique(self.confirmed_facts, "Lenovo said the case would be escalated to the returns team")
+            if any(x in lowered for x in ["5-7 business days", "processed within"]):
+                self._append_unique(self.confirmed_facts, "Lenovo stated the refund would process within 5-7 business days after receiving the return")
+        else:
+            if any(x in lowered for x in ["written basis", "policy basis"]):
+                self._append_unique(self.unresolved_demands, "written basis for withholding the refund")
+            if "case id" in lowered:
+                self._append_unique(self.unresolved_demands, "case ID confirmation and escalation status")
+            if "timeline" in lowered or "24 hours" in lowered:
+                self._append_unique(self.unresolved_demands, "written resolution timeline")
+            if "returns team" in lowered or "escalat" in lowered:
+                self._append_unique(self.unresolved_demands, "returns-team escalation")
+
+        claims_text = " ".join(self.operator_claims).lower()
+        if ("empty box" in claims_text or "box was empty" in claims_text) and (
+            "warehouse did not receive the return" in claims_text or "not receive the return" in claims_text
+        ):
+            self._append_unique(
+                self.contradictions,
+                "Lenovo has said both that the box was empty and that the warehouse did not receive the return",
+            )
+        if "received back" in claims_text and (
+            "warehouse did not receive the return" in claims_text or "not receive the return" in claims_text
+        ):
+            self._append_unique(
+                self.contradictions,
+                "Lenovo has said both that the return was received back and that the warehouse did not receive it",
+            )
+
+        self.dialogue_state = self._infer_dialogue_state()
+
+    def _infer_dialogue_state(self):
+        intent = self.infer_agent_intent(self.last_agent_msg)
+        if self.message_count <= 1:
+            return "opening"
+        if intent == "keepalive":
+            return "holding"
+        if intent in {"ups_redirect", "empty_box_claim", "warehouse_missing_claim"}:
+            return "denial_or_deflection"
+        if intent in {"case_id_provided", "escalation_confirmed"}:
+            return "escalated_pending_timeline"
+        if intent == "timeline_statement":
+            return "timeline_offered"
+        return "active_negotiation"
 
     def infer_agent_intent(self, text):
         t = (text or "").lower()
@@ -676,6 +781,8 @@ Before answering, silently proofread the message for grammar and clarity."""
             message = self._fallback_message(agent_text=agent_text, first_turn=first_turn)
         if action == "send_message" and not self._message_addresses_intent(message, agent_text):
             message = self._fallback_message(agent_text=agent_text, first_turn=first_turn)
+        if action == "send_message":
+            message = self._critic_pass(agent_text, message, observation, first_turn)
         return {
             "action": action,
             "message": message,
@@ -778,6 +885,38 @@ Before answering, silently proofread the message for grammar and clarity."""
             return json.loads(m.group(0))
         except Exception:
             return None
+
+    def _critic_pass(self, agent_text, draft, observation=None, first_turn=False):
+        draft = (draft or "").strip()
+        if not draft:
+            return draft
+        if self._looks_like_role_inversion(draft):
+            return self._fallback_message(agent_text=agent_text, first_turn=first_turn)
+        if not self._message_addresses_intent(draft, agent_text):
+            return self._fallback_message(agent_text=agent_text, first_turn=first_turn)
+        try:
+            critic_input = {
+                "case": self.build_case_snapshot(),
+                "latest_agent_message": agent_text or "",
+                "draft_reply": draft,
+                "observation": observation or {},
+            }
+            raw = self._call_llm(
+                system_prompt=REPLY_CRITIC_PROMPT,
+                history=[{"role": "user", "content": json.dumps(critic_input, ensure_ascii=True)}],
+                temperature=0.0,
+                sanitize=False,
+            )
+            verdict = self._extract_json_object(raw) or {}
+            approved = bool(verdict.get("approved"))
+            fix = self._sanitize_reply(verdict.get("fix") or "")
+            if approved:
+                return draft
+            if fix and not self._looks_like_role_inversion(fix) and self._message_addresses_intent(fix, agent_text):
+                return fix
+        except Exception:
+            pass
+        return draft
 
     def _call_llm(self, system_prompt=None, history=None, temperature=None, sanitize=True):
         headers = {
