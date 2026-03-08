@@ -12,6 +12,18 @@ Use one entry per significant work block.
 ---
 
 ## 2026-03-08
+- Scope: Chat reasoning hardening for Lenovo operator dialogue.
+- Actions:
+  - Added explicit operator-intent handling for `keepalive`, `UPS redirect`, `empty-box claim`, `warehouse not received`, `case ID provided`, `escalation confirmed`, and `transcript offer`.
+  - Extended the case snapshot with `last_agent_message`, `last_customer_message`, `agent_intent`, and `current_objective` so the agent loop reasons from the latest move instead of only the raw transcript tail.
+  - Added reply safeguards that reject role-inverted merchant-style answers, reject replies that do not address the latest operator intent, and block near-duplicate outbound messages.
+  - Added human-like send delay and improved Lenovo transcript reading so the bot no longer treats Powerfront system/menu text as real operator dialogue.
+- Result:
+  - The bot is less likely to repeat the same escalation wording, more likely to answer the operator's exact last move, and safer against duplicate or logically mismatched replies in Lenovo chats.
+- Issues/Notes:
+  - Live end-to-end operator validation is still required because the current live loop was interrupted and should be restarted from a clean chat session.
+
+## 2026-03-08
 - Scope: Agent-style dialogue controller and Lenovo workflow-input routing fix.
 - Actions:
   - Added a structured OpenAI decision layer that returns `send_message`, `wait`, or `finish` from live case context, transcript tail, and UI observation.

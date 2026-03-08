@@ -12,6 +12,8 @@ import os
 import select
 import time
 import re
+import random
+import difflib
 from pathlib import Path
 import requests
 from datetime import datetime
@@ -115,13 +117,20 @@ Your job:
 - Read the current case context, transcript, latest agent message, and UI observation.
 - Decide the single best next action.
 - Prefer concrete progress over generic replies.
+- Respond to the latest operator move, not to the case in general.
+- Avoid repeating the same demand unless the operator ignored it and the message explicitly says that.
+- If the operator asks a narrow question or makes a specific claim, answer that exact point first, then push the case forward.
 - If the chat is not truly ready for a live agent message, choose wait.
 - If the agent asks for data already known in the case, answer directly and concisely.
 - If the agent is vague or stalling, ask for a concrete action, case ID, escalation owner, or timeline.
 - Write in natural, grammatical US English.
 - Write to the support agent, not to the customer.
+- You are the customer's representative speaking to the merchant's support agent.
 - Never address the customer by name.
 - Never ask the customer what they prefer; ask the support agent to confirm what they can do.
+- Never speak as the merchant, support team, refunds team, or an internal department.
+- Never say you will check, review internally, contact another team, or provide an internal update later.
+- Never ask the support agent to hold while you verify information.
 
 Allowed actions:
 - send_message
@@ -141,6 +150,7 @@ Rules:
 - `message` must be empty when action is wait or finish.
 - Never invent facts, policies, evidence, or promises.
 - Keep message to 2-5 short sentences.
+- Do not repeat the previous customer-side message with light rewording.
 - End the message with one clear requested action and timeline when action is send_message."""
 
 # ─── ПАРСИНГ ИМЕНИ ПРОФИЛЯ ───────────────────────────────────────────────────
@@ -196,9 +206,9 @@ CHAT_SELECTORS = {
         "open_chat_new": "button:has-text('New Order')",
         # Genesys Web Widget — точные селекторы из скрина 5
         "widget_container": "[class*='cx-widget'], [id*='cx-container'], .cx-webchat",
-        "messages": ".cx-message, [class*='cx-message'], .cx-bubble",
-        # Агентские сообщения — имеют класс cx-agent или просто не имеют cx-visitor
-        "agent_msg": ".cx-message:not(.cx-visitor), [class*='cx-agent-message'], .cx-bubble-agent",
+        "messages": ".cx-message, [class*='cx-message'], .cx-bubble, .message",
+        # Реальный Lenovo/Powerfront transcript использует .message.operator / .message.visitor
+        "agent_msg": ".cx-message:not(.cx-visitor), [class*='cx-agent-message'], .cx-bubble-agent, .message.operator, .message.plain.operator, .lastOperatorMessage",
         # Поле ввода — из скрина: placeholder="Type your message here"
         "input": "textarea[placeholder='Type your message here'], input[placeholder='Type your message here'], .cx-input textarea, [class*='cx-input']",
         # Кнопка отправки — в Genesys обычно иконка/кнопка рядом с полем
@@ -462,7 +472,30 @@ class CopilotSession:
         self.transcript = []
         self.message_count = 0
         self.last_agent_msg = ""
+        self.last_sent_msg = ""
         self.last_llm_error = ""
+
+    def case_name(self):
+        t = (self.case_type or "").upper()
+        if t == "INR":
+            return "Item Not Received"
+        if t in {"RNR", "REFUND"}:
+            return "Refund Not Received After Return"
+        if t in {"DOA", "DAMAGED", "DEFECTIVE", "BROKEN"}:
+            return "Defective Item Returned, Refund Overdue"
+        return "Refund Not Received After Return"
+
+    def case_issue_summary(self):
+        t = (self.case_type or "").upper()
+        if t == "INR":
+            return "the order was not received"
+        if t in {"DOA", "DAMAGED", "DEFECTIVE", "BROKEN"}:
+            return (
+                "the laptop was delivered with a broken screen, Lenovo arranged a replacement, "
+                "the replacement was not received and was returned back to Lenovo, and the returned merchandise "
+                "has already been delivered back but the refund is still outstanding"
+            )
+        return "the returned merchandise was delivered back to the merchant but the refund is still outstanding"
 
     def generate_first_message(self):
         plan = self.plan_next_action(
@@ -473,7 +506,7 @@ class CopilotSession:
         reply = (plan.get("message") or "").strip()
         if not reply:
             prompt = f"""Start a live support chat with {self.store}.
-Case: {"Item Not Received" if self.case_type == "INR" else "Return Not Refunded"}
+Case: {self.case_name()}
 Order: {self.order_num or "N/A"}
 Amount: {f"${self.amount}" if self.amount else "N/A"}
 Details: {self.details or "none"}
@@ -485,6 +518,7 @@ Make it polished, grammatical, and natural."""
         self.history.append({"role": "assistant", "content": reply})
         self.transcript.append({"role": "customer_rep", "content": reply})
         self.message_count = 1
+        self.last_sent_msg = reply
         return reply
 
     def generate_reply(self, agent_text):
@@ -512,13 +546,13 @@ Before answering, silently proofread the message for grammar and clarity."""
         self.history.append({"role": "assistant", "content": reply})
         self.transcript.append({"role": "customer_rep", "content": reply})
         self.message_count += 1
+        self.last_sent_msg = reply
         return reply
 
     def build_case_snapshot(self):
-        case_name = "Item Not Received" if self.case_type == "INR" else "Return Not Refunded"
         return {
             "store": self.store,
-            "case_type": case_name,
+            "case_type": self.case_name(),
             "order_num": self.order_num or "",
             "amount": f"{self.amount}" if self.amount else "",
             "details": self.details or "",
@@ -526,6 +560,10 @@ Before answering, silently proofread the message for grammar and clarity."""
             "customer_email": self.customer_email or "",
             "customer_phone": self.customer_phone or "",
             "message_count": self.message_count,
+            "last_agent_message": self.last_agent_msg or "",
+            "last_customer_message": self.last_sent_msg or "",
+            "agent_intent": self.infer_agent_intent(self.last_agent_msg),
+            "current_objective": self.current_objective(),
         }
 
     def record_agent_message(self, agent_text):
@@ -534,6 +572,58 @@ Before answering, silently proofread the message for grammar and clarity."""
             return
         self.last_agent_msg = agent_text
         self.transcript.append({"role": "agent", "content": agent_text})
+
+    def should_send_message(self, message):
+        normalized = self._normalize_message(message)
+        if not normalized:
+            return False
+        last = self._normalize_message(self.last_sent_msg)
+        if normalized == last:
+            return False
+        if last and difflib.SequenceMatcher(a=normalized, b=last).ratio() >= 0.88:
+            return False
+        return True
+
+    def mark_message_sent(self, message):
+        self.last_sent_msg = (message or "").strip()
+
+    def infer_agent_intent(self, text):
+        t = (text or "").lower()
+        if any(x in t for x in ["still connected", "checking in to confirm whether we are still connected"]):
+            return "keepalive"
+        if any(x in t for x in ["contact ups", "reach out to ups", "ups drop-off center", "ups for the order confirmation"]):
+            return "ups_redirect"
+        if "chat transcript" in t:
+            return "transcript_offer"
+        if any(x in t for x in ["will be escalated", "escalated to the returns team"]):
+            return "escalation_confirmed"
+        if any(x in t for x in ["case id", "c004094813"]) and any(x in t for x in ["here is", "shared", "raised"]):
+            return "case_id_provided"
+        if "empty box" in t or "box was empty" in t:
+            return "empty_box_claim"
+        if any(x in t for x in ["warehouse has not received", "not received the returned item", "not received the return"]):
+            return "warehouse_missing_claim"
+        if any(x in t for x in ["5-7 business days", "processed within", "resolution timeline"]):
+            return "timeline_statement"
+        return "general"
+
+    def current_objective(self):
+        intent = self.infer_agent_intent(self.last_agent_msg)
+        if intent == "keepalive":
+            return "confirm connection and force a concrete next step"
+        if intent == "ups_redirect":
+            return "push Lenovo to coordinate internally with UPS and keep the case escalated"
+        if intent == "empty_box_claim":
+            return "demand written basis and returns-team escalation for the empty-box claim"
+        if intent == "warehouse_missing_claim":
+            return "highlight the contradiction and force Lenovo to clarify lost return versus empty-box claim"
+        if intent == "case_id_provided":
+            return "turn the case ID into a confirmed escalation with a written timeline"
+        if intent == "escalation_confirmed":
+            return "obtain written resolution timeline and exact dispute classification"
+        if intent == "transcript_offer":
+            return "accept the transcript only if escalation and timeline are also confirmed"
+        return "push toward refund, escalation, written basis, and timeline"
 
     def plan_next_action(self, agent_text="", observation=None, first_turn=False):
         observation = observation or {}
@@ -582,6 +672,10 @@ Before answering, silently proofread the message for grammar and clarity."""
         if action not in {"send_message", "wait", "finish"}:
             action = "wait"
         message = self._sanitize_reply(plan.get("message") or "") if action == "send_message" else ""
+        if action == "send_message" and self._looks_like_role_inversion(message):
+            message = self._fallback_message(agent_text=agent_text, first_turn=first_turn)
+        if action == "send_message" and not self._message_addresses_intent(message, agent_text):
+            message = self._fallback_message(agent_text=agent_text, first_turn=first_turn)
         return {
             "action": action,
             "message": message,
@@ -591,9 +685,15 @@ Before answering, silently proofread the message for grammar and clarity."""
         }
 
     def _fallback_message(self, agent_text="", first_turn=False):
-        issue = "I did not receive the order" if self.case_type == "INR" else "my return has not been refunded"
+        issue = self.case_issue_summary()
         order = self.order_num or "my order"
         if first_turn:
+            if (self.case_type or "").upper() in {"DOA", "DAMAGED", "DEFECTIVE", "BROKEN"}:
+                return (
+                    f"I need help with order {order}. "
+                    "The laptop was delivered with a broken screen, Lenovo arranged a replacement, the replacement was not received and returned back to Lenovo, and the returned merchandise has already been delivered back. "
+                    "Please confirm the full refund and the exact processing timeline today."
+                )
             return (
                 f"Hello, I need help with order {order}. "
                 f"The issue is that {issue}. "
@@ -601,10 +701,35 @@ Before answering, silently proofread the message for grammar and clarity."""
             )
 
         t = (agent_text or "").lower()
+        if any(x in t for x in ["still connected", "checking in to confirm whether we are still connected", "are we still connected"]):
+            return (
+                "Yes, we are still connected. "
+                "Please confirm whether case ID C004094813 has already been escalated to the returns team and provide the written resolution timeline today."
+            )
+        if "will be escalated" in t and any(x in t for x in ["case id", "c004094813", "returns team"]):
+            return (
+                "Thank you for confirming the escalation. "
+                "Please confirm the written resolution timeline for case ID C004094813 today and clarify whether Lenovo is treating this as an empty-box claim or a lost return."
+            )
+        if any(x in t for x in ["contact ups", "reach out to ups", "contact the ups drop-off center", "ups for the order confirmation"]):
+            return (
+                "The return used Lenovo's UPS label, so Lenovo should coordinate with UPS internally if Lenovo is disputing the contents of the return. "
+                "Please keep case ID C004094813 escalated with the returns team and confirm the written basis for withholding the refund plus the exact resolution timeline today."
+            )
+        if any(x in t for x in ["warehouse has not received", "not received the returned item", "not received the return", "returned item not received"]):
+            return (
+                "Your updates are inconsistent because Lenovo previously stated that the return was received back, and now you are stating that the warehouse did not receive it. "
+                "Please escalate this discrepancy to the returns team today, provide the case ID for that escalation, and confirm in writing whether Lenovo is treating this as a lost return or an empty-box claim."
+            )
         if any(x in t for x in ["email", "e-mail"]):
             return (
                 f"The email on the order is {normalize_customer_email(self.customer_email)}. "
                 "Please confirm the next step and timeline after you review it."
+            )
+        if any(x in t for x in ["ups", "receipt", "drop-off", "drop off", "empty box"]):
+            return (
+                f"The return for order {order} was sent using Lenovo's UPS label and Lenovo's own update states that the return was received back. "
+                "If Lenovo is asserting an empty-box exception, please escalate this to the returns team today, provide the case ID, and confirm the written basis for withholding the refund."
             )
         if "phone" in t:
             return (
@@ -627,6 +752,11 @@ Before answering, silently proofread the message for grammar and clarity."""
             return (
                 "Please escalate this to a supervisor or escalations team and provide the policy basis in writing today. "
                 "Also confirm the case ID and deadline for resolution."
+            )
+        if (self.case_type or "").upper() in {"DOA", "DAMAGED", "DEFECTIVE", "BROKEN"}:
+            return (
+                f"Lenovo has already received the returned merchandise for order {order}, so the refund should not remain outstanding. "
+                "Please confirm whether you will complete the full refund now or escalate this to the refunds team today with a case ID and timeline."
             )
         return (
             f"I need a concrete update on order {order}. "
@@ -702,6 +832,59 @@ Before answering, silently proofread the message for grammar and clarity."""
         t = re.sub(r"\n{2,}", "\n", t).strip()
         return t
 
+    def _normalize_message(self, text):
+        return re.sub(r"\s+", " ", (text or "").strip().lower())
+
+    def _message_addresses_intent(self, message, agent_text):
+        msg = self._normalize_message(message)
+        intent = self.infer_agent_intent(agent_text)
+        if not msg:
+            return False
+        if intent == "keepalive":
+            return "connected" in msg or msg.startswith("yes")
+        if intent == "ups_redirect":
+            return "ups" in msg and ("internally" in msg or "returns team" in msg or "escalat" in msg)
+        if intent == "transcript_offer":
+            return "transcript" in msg or "timeline" in msg or "escalat" in msg
+        if intent == "case_id_provided":
+            return "c004094813" in msg or "case id" in msg
+        if intent == "escalation_confirmed":
+            return "timeline" in msg or "written" in msg or "empty-box" in msg or "lost return" in msg
+        if intent == "empty_box_claim":
+            return "empty box" in msg or "written basis" in msg or "returns team" in msg
+        if intent == "warehouse_missing_claim":
+            return "inconsistent" in msg or "received back" in msg or "lost return" in msg
+        return True
+
+    def _looks_like_role_inversion(self, text):
+        t = (text or "").strip().lower()
+        if not t:
+            return False
+        bad_starts = (
+            "i understand your concern",
+            "i understand the urgency",
+            "i will check",
+            "i'll check",
+            "let me check",
+            "please hold on",
+            "hold on for a moment",
+            "i can understand your concern",
+        )
+        if t.startswith(bad_starts):
+            return True
+        bad_fragments = [
+            "our returns department",
+            "our team",
+            "our records",
+            "our internal team",
+            "i will verify",
+            "i will review",
+            "i will provide you with an update",
+            "while i gather this information",
+            "please allow me",
+        ]
+        return any(fragment in t for fragment in bad_fragments)
+
 
 # ─── CHAT READER/WRITER ──────────────────────────────────────────────────────
 
@@ -753,7 +936,9 @@ async def read_last_agent_message(page, store):
     sel = CHAT_SELECTORS.get(store, CHAT_SELECTORS["default"])
     try:
         def looks_like_system_noise(text):
-            t = (text or "").strip().lower()
+            raw = (text or "").strip()
+            t = raw.lower()
+            normalized = re.sub(r"\s+", " ", t)
             if not t or len(t) < 5:
                 return True
             blocked_exact = {
@@ -764,8 +949,28 @@ async def read_last_agent_message(page, store):
                 "consumer",
                 "start a new chat",
                 "type your message here",
+                "ai chatbot by powerfronttm",
+                "back to main menu",
+                "chat to human",
+                "request video chat",
+                "schedule appointment",
+                "print transcript",
+                "leave a message",
+                "attach a file",
+                "end chat",
+                "join the call",
+                "click to call",
+                "cookies opt-out",
             }
-            if t in blocked_exact:
+            if normalized in blocked_exact:
+                return True
+            blocked_prefixes = (
+                "ai chatbot by powerfront",
+                "welcome to lenovo support",
+                "welcome to lenovo",
+                "one moment please while i transfer you",
+            )
+            if normalized.startswith(blocked_prefixes):
                 return True
             blocked_fragments = [
                 "one moment",
@@ -773,6 +978,18 @@ async def read_last_agent_message(page, store):
                 "connecting",
                 "please wait",
                 "queue",
+                "ai chatbot by powerfront",
+                "powerfront",
+                "lenovo online sales support",
+                "back to main menu",
+                "chat to human",
+                "request video chat",
+                "schedule appointment",
+                "print transcript",
+                "leave a message",
+                "attach a file",
+                "click to call",
+                "cookies opt-out",
                 "welcome to lenovo",
                 "how can we help you today?",
                 "chat via whatsapp",
@@ -789,8 +1006,28 @@ async def read_last_agent_message(page, store):
                 "please enter your email address",
                 "please enter your phone number",
                 "order number",
+                "this chat may be monitored",
+                "your chat transcript",
             ]
-            return any(p in t for p in blocked_fragments)
+            if any(p in normalized for p in blocked_fragments):
+                return True
+            # Mixed control/menu panels often come through as one blob.
+            if sum(
+                phrase in normalized
+                for phrase in (
+                    "chat to human",
+                    "request video chat",
+                    "schedule appointment",
+                    "print transcript",
+                    "leave a message",
+                    "attach a file",
+                )
+            ) >= 2:
+                return True
+            # System prompts are not actionable operator replies.
+            if re.search(r"\(\d+\s+of\s+\d+\)", normalized):
+                return True
+            return False
 
         frames = [page.main_frame] + list(page.frames)
 
@@ -1116,6 +1353,14 @@ async def send_message(page, store):
                 return True
     except:
         pass
+
+async def human_send_delay(text, min_seconds=4.0, max_seconds=16.0):
+    """Короткая пауза перед отправкой, чтобы бот не отвечал мгновенно."""
+    length = len(re.sub(r"\s+", " ", (text or "").strip()))
+    base = 4.0 + min(length / 85.0, 7.0)
+    pause = min(max(base + random.uniform(-1.2, 2.8), min_seconds), max_seconds)
+    print(f"⏳ Human pause before send: {pause:.1f}s")
+    await asyncio.sleep(pause)
     return False
 
 async def click_first_visible(page, selectors):
@@ -1364,6 +1609,40 @@ async def restart_expired_lenovo_chat(page):
                 return True
         except Exception:
             continue
+    # Fallback for stale/closed Powerfront state: reset from the outer Lenovo page CTA.
+    try:
+        has_expired = False
+        for frame in frames:
+            try:
+                txt = await frame.evaluate("() => (document.body && document.body.innerText) ? document.body.innerText.toLowerCase() : ''")
+                if "start a new chat" in (txt or ""):
+                    has_expired = True
+                    break
+            except Exception:
+                continue
+        if has_expired:
+            try:
+                await page.evaluate(
+                    """
+                    () => {
+                      const pane = document.querySelector("#insideChatPane");
+                      if (pane) pane.classList.add("closed");
+                      const holder = document.querySelector("#inside_holder");
+                      if (holder) holder.classList.remove("chatPaneOpen");
+                      const iframe = document.querySelector("#insideChatFrame");
+                      if (iframe) iframe.style.pointerEvents = "none";
+                    }
+                    """
+                )
+            except Exception:
+                pass
+            reopened = await click_lenovo_contact_chat_cta(page)
+            if reopened:
+                print("  ✅ Lenovo step: Restart via outer chat CTA")
+                await page.wait_for_timeout(900)
+                return True
+    except Exception:
+        pass
     return False
 
 async def click_lenovo_picklist_option(page, labels):
@@ -1783,6 +2062,12 @@ async def get_lenovo_widget_text(page):
                 return txt
         except Exception:
             continue
+        try:
+            txt = await frame.evaluate("() => (document.body && document.body.innerText) ? document.body.innerText.replace(/\\s+/g, ' ').trim() : ''")
+            if txt and "lenovo" in txt.lower():
+                return txt
+        except Exception:
+            continue
     return ""
 
 def classify_lenovo_widget_state(text):
@@ -2016,17 +2301,19 @@ async def fill_lenovo_advisor_step(page, session, forced_state=None):
             ],
             "email": [
                 "#insideWorkflowFieldCell input[type='email']:visible",
-                "#insideWorkflowFieldCell input:visible",
                 "input[aria-label*='email' i]:visible",
+                "#insideWorkflowFieldCell input:visible",
                 "input[placeholder*='email' i]:visible",
             ],
             "phone": [
+                "input[aria-label='xxx-xxx-xxxx']:visible",
                 "#insideWorkflowFieldCell input[type='tel']:visible",
-                "#insideWorkflowFieldCell input:visible",
                 "input[aria-label*='phone' i]:visible",
+                "#insideWorkflowFieldCell input:visible",
                 "input[placeholder*='phone' i]:visible",
             ],
             "order": [
+                "input[aria-label*='order number' i]:visible",
                 "#insideWorkflowFieldCell input:visible",
                 "input[aria-label*='order' i]:visible",
                 "input[placeholder*='order' i]:visible",
@@ -3066,7 +3353,11 @@ async def run_session(
         print(first_msg)
         print("─" * 55)
 
-        if not await is_operator_chat_open(page, store):
+        if not session.should_send_message(first_msg):
+            print("⏭️  Дубликат первого сообщения обнаружен, пропускаю отправку.")
+            first_msg = ""
+
+        if first_msg and not await is_operator_chat_open(page, store):
             print("⚠️  Операторский чат ещё не открыт. Возвращаюсь к шагам подключения.")
             await try_open_operator_flow(page, store, session)
             await page.wait_for_timeout(1200)
@@ -3077,27 +3368,33 @@ async def run_session(
                     await page.wait_for_timeout(1500)
 
         # Вставляем в чат
-        typed = await type_message(page, store, first_msg)
-        if typed:
-            print("✅ Текст вставлен в поле чата")
-        else:
-            print("⚠️  Не удалось вставить автоматически — скопируй вручную")
+        typed = False
+        if first_msg:
+            typed = await type_message(page, store, first_msg)
+            if typed:
+                print("✅ Текст вставлен в поле чата")
+            else:
+                print("⚠️  Не удалось вставить автоматически — скопируй вручную")
 
-        first_is_critical = is_critical_message(first_msg, session.message_count)
-        should_confirm_first = (first_is_critical and not auto_send_critical) or (
-            not first_is_critical and not auto_send_noncritical
-        )
+        first_is_critical = is_critical_message(first_msg, session.message_count) if first_msg else False
+        should_confirm_first = (
+            (first_is_critical and not auto_send_critical) or (not first_is_critical and not auto_send_noncritical)
+        ) if first_msg else False
         if should_confirm_first:
             confirm = input("\n  Отправить сообщение? [Y/n]: ").strip().lower()
             allow_send = confirm != "n"
         else:
-            first_mode = "критичный шаг" if first_is_critical else "не критичный шаг"
-            print(f"🤖 Авто-отправка: {first_mode}, отправляю без подтверждения.")
-            allow_send = True
+            allow_send = bool(first_msg)
+            if first_msg:
+                first_mode = "критичный шаг" if first_is_critical else "не критичный шаг"
+                print(f"🤖 Авто-отправка: {first_mode}, отправляю без подтверждения.")
 
         if allow_send:
+            await human_send_delay(first_msg)
             sent = await send_message(page, store)
             print("✅ Отправлено!" if sent else "⚠️  Нажми Enter в чате вручную")
+            if sent:
+                session.mark_message_sent(first_msg)
 
         # Основной цикл диалога
         print("\n🔄 Онлайн-режим диалога запущен.\n")
@@ -3183,6 +3480,10 @@ async def run_session(
             print(our_reply)
             print("─" * 55)
 
+            if not session.should_send_message(our_reply):
+                print("⏭️  Дубликат ответа обнаружен, пропускаю отправку.")
+                continue
+
             if not await is_operator_chat_open(page, store):
                 print("⚠️  Операторский чат не подтверждён. Пропускаю отправку и пытаюсь открыть чат.")
                 await try_open_operator_flow(page, store, session)
@@ -3208,8 +3509,11 @@ async def run_session(
                 allow_send = True
 
             if allow_send:
+                await human_send_delay(our_reply)
                 sent = await send_message(page, store)
                 print("✅ Отправлено!" if sent else "⚠️  Нажми Enter в чате вручную")
+                if sent:
+                    session.mark_message_sent(our_reply)
 
             if session.message_count >= 4:
                 print("\n🏁 Достигнут финальный этап эскалации.")
@@ -3234,6 +3538,8 @@ def detect_store_from_profile_name(name):
 def detect_case_from_profile_name(name):
     """Определяем тип кейса из названия профиля"""
     name_lower = name.lower()
+    if any(k in name_lower for k in ["doa", "damaged", "broken", "defective", "screen", "replacement"]):
+        return "DOA"
     if "inr" in name_lower or "not received" in name_lower or "не получил" in name_lower:
         return "INR"
     if "rnr" in name_lower or "refund" in name_lower or "возврат" in name_lower:
@@ -3360,6 +3666,9 @@ async def main():
     order_num = block_data.get("order") or ask("Номер заказа (Enter = пропустить)", "")
     amount = ask("Сумма в $ (Enter = пропустить)", "")
     details = ask("Детали проблемы", "") if not autopilot else ""
+    details_lower = (details or "").lower()
+    if any(k in details_lower for k in ["broken screen", "broken", "defective", "damaged", "replacement", "returned back", "returned to lenovo", "ups label"]):
+        case_type = "DOA"
     customer_name = block_data.get("name") or ask("Имя клиента для pre-chat (Enter = клиент из профиля)", client_name)
     customer_email = block_data.get("email") or ask("Email для pre-chat (Enter = пропустить)", "")
     customer_phone = block_data.get("phone") or ask("Phone для pre-chat (Enter = пропустить)", "")
