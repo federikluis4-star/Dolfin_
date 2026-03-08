@@ -2,6 +2,16 @@
 .env
 .env.*
 !.env.example
+.envrc
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+*.mobileprovision
+id_rsa
+id_ed25519
 
 # Python
 __pycache__/

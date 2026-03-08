@@ -11,6 +11,79 @@ Use one entry per significant work block.
 
 ---
 
+## 2026-03-08
+- Scope: Agent-style dialogue controller and Lenovo workflow-input routing fix.
+- Actions:
+  - Added a structured OpenAI decision layer that returns `send_message`, `wait`, or `finish` from live case context, transcript tail, and UI observation.
+  - Wired runtime observation into the first outbound message and each later reply so the bot reasons before acting instead of only templating a response.
+  - Tightened Lenovo workflow-field filling so required advisor steps target workflow inputs and avoid the lower free-form `#chatInput`.
+  - Hardened Lenovo runtime detection to avoid treating menu text such as `CHAT WITH US` and pre-chat prompts as real operator messages.
+- Result:
+  - The bot now has an explicit `observe -> reason -> act` loop for operator dialogue and no longer routes customer data into the wrong Genesys field during Lenovo form steps.
+- Issues/Notes:
+  - A full live regression run is still required to verify the new decision layer against the current Lenovo widget render and restored API billing.
+
+## 2026-03-08
+- Scope: Repository secret hygiene hardening.
+- Actions:
+  - Verified tracked files and git history for `.env`/API key leakage and found no committed real secrets.
+  - Expanded `.gitignore` to exclude common key and certificate files in addition to `.env` files.
+  - Strengthened `.githooks/pre-commit` and `.githooks/pre-push` to block staged or pushed diffs containing API keys, Dolphin tokens, or private key material.
+- Result:
+  - The repository now has stronger prevention against secret leakage to remote repositories.
+- Issues/Notes:
+  - `.env.example` remains tracked by design and currently contains placeholders only.
+
+## 2026-03-07
+- Scope: Lenovo insideChatFrame picklist compatibility fix.
+- Actions:
+  - Inspected the live Lenovo widget DOM over CDP and confirmed workflow steps are rendered inside `#insideChatFrame` as `.picklistOption` entries.
+  - Added dedicated picklist-option clicking and widened Lenovo widget detection to include `insideChatFrame/insideChatPane` structures.
+- Result:
+  - Live validation confirmed the flow advances from `Existing Orders` to the next advisor step `"(1 of 4) What's your name?"`.
+- Issues/Notes:
+  - Further advisor steps still depend on runtime field matching and should be validated in a full end-to-end conversation.
+
+## 2026-03-07
+- Scope: Reduced Playwright click stalls in early Lenovo chat preparation.
+- Actions:
+  - Updated `click_first_visible` to use bounded `force=True` clicks with a short timeout and selector logging.
+- Result:
+  - Early chat-preparation clicks no longer wait on long actionability checks for partially covered Lenovo controls.
+- Issues/Notes:
+  - Live validation is still needed because Lenovo widget layering can change per render.
+
+## 2026-03-07
+- Scope: Lenovo launcher diagnostics and stronger fallback clicking.
+- Actions:
+  - Added runtime logging around `Chat Now` waiting and floating launcher discovery.
+  - Strengthened floating launcher clicks with combined DOM click plus direct mouse click on the detected element center.
+- Result:
+  - Next live runs expose whether Lenovo fails on detection, click delivery, or post-click widget expansion.
+- Issues/Notes:
+  - This change improves observability first; runtime validation is still required against the live widget.
+
+## 2026-03-07
+- Scope: Lenovo chat launcher click reliability fix during live runtime validation.
+- Actions:
+  - Corrected launcher fallback candidate selection in `bot.py` so the rightmost/bottommost floating chat element is actually clicked.
+  - Confirmed the failure mode during a live `Luna_CA` run where the blue launcher was visible but automation did not advance.
+- Result:
+  - Floating launcher fallback now targets the intended Lenovo chat button instead of the least relevant candidate in the sorted set.
+- Issues/Notes:
+  - Lenovo widget behavior remains timing-sensitive, so runtime validation after this fix is still required.
+
+## 2026-03-07
+- Scope: Agent onboarding entrypoint and repository operating context.
+- Actions:
+  - Added `docs/AGENT_ENTRYPOINT.md` as the mandatory first-read document for new agents/contributors.
+  - Documented current architecture, technology stack, dirty working tree state, operating constraints, and expected start/end workflow.
+  - Updated `AGENTS.md` so the repository guardrails explicitly point new contributors to the entrypoint before editing code.
+- Result:
+  - New threads can onboard faster against the real current project state instead of relying only on scattered docs or commit history.
+- Issues/Notes:
+  - The repo still has live uncommitted product changes in `bot.py`, `README.md`, `.env.example`, `install.sh`, and `requirements.txt`; future agents must inspect diffs before assuming `HEAD` is canonical.
+
 ## 2026-03-06
 - Scope: Stabilization of Lenovo chat automation flow.
 - Actions:

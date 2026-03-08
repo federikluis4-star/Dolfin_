@@ -23,6 +23,16 @@ Document every meaningful runtime failure and mitigation.
 - Status:
   - Improved but runtime-dependent; continue iterative hardening.
 
+## 2026-03-07 — Floating Launcher Fallback Chose Wrong Element
+- Symptom:
+  - Blue Lenovo chat launcher was visible, but fallback clicking did not open the widget during a live run.
+- Cause:
+  - Fallback candidates were sorted to prefer the bottom-right launcher, but code selected the last element after sorting, effectively biasing toward the least relevant candidate.
+- Mitigation:
+  - Updated the fallback selection to click the first candidate after priority sorting.
+- Status:
+  - Fixed in code; pending live revalidation.
+
 ## 2026-03-06 — Unexpected Profile Restart During Testing
 - Symptom:
   - Profile appeared to close/reopen during repeated bot restarts.

@@ -2,6 +2,12 @@
 
 This repository enforces mandatory documentation discipline for any coding agent/human contributor.
 
+## Mandatory First Read
+Before making changes, read:
+1. `docs/AGENT_ENTRYPOINT.md`
+2. `docs/PROJECT_CHRONOLOGY.md`
+3. `docs/ERROR_LOG.md` if working on a fix, regression, or runtime incident
+
 ## Non-negotiable rules
 1. Before every commit, update:
    - `docs/PROJECT_CHRONOLOGY.md` (required if code changed)

@@ -37,8 +37,19 @@ if echo "$COMMITS" | tr '[:upper:]' '[:lower:]' | grep -Eq '(fix|bug|error|incid
 fi
 
 # Prevent pushing tracked env secrets
-if echo "$CHANGED" | grep -Eq '(^|/)\.env($|\.)'; then
+if echo "$CHANGED" | grep -E '(^|/)\.env($|\.)' | grep -Evq '(^|/)\.env\.example$'; then
   echo "ERROR: push includes .env-related tracked files."
+  exit 1
+fi
+
+if echo "$CHANGED" | grep -Eq '(^|/)(id_rsa|id_ed25519|.*\.(pem|key|p12|pfx|crt|cer|mobileprovision))$'; then
+  echo "ERROR: push includes secret or key material files."
+  exit 1
+fi
+
+SCAN_DIFF="$(git diff --no-ext-diff "$RANGE" -- . ':(exclude).githooks/pre-commit' ':(exclude).githooks/pre-push' ':(exclude).env.example' || true)"
+if echo "$SCAN_DIFF" | grep -Eiq '(sk-proj-[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9_-]{20,}|OPENAI_API_KEY=[^[:space:]]*(sk-proj-|sk-[A-Za-z0-9_-]{20,})|DOLPHIN_SESSION_TOKEN=[^[:space:]]{8,}|DOLPHIN_CLOUD_API_KEY=[^[:space:]]{8,}|-----BEGIN (RSA|OPENSSH|EC|DSA|PRIVATE KEY)-----)'; then
+  echo "ERROR: push diff appears to contain secrets or private key material."
   exit 1
 fi
 

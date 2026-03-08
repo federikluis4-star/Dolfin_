@@ -9,7 +9,7 @@ bot.py подключается
     ↓ CDP (Chrome DevTools Protocol)
 Читает DOM чата на странице
     ↓
-Отправляет в OpenRouter API
+Отправляет в OpenAI API
     ↓
 Вставляет ответ в поле чата
     ↓
@@ -35,9 +35,9 @@ playwright install chromium
 - Настройки → **Local API** → включить → порт **3001**
 - Создай профили под нужные магазины
 
-### 4. Получи API ключ OpenRouter
-- Зайди на https://openrouter.ai/
-- Keys → Create Key → скопируй `sk-or-...`
+### 4. Получи API ключ OpenAI
+- Зайди на https://platform.openai.com/
+- API keys → Create new secret key → скопируй `sk-...`
 - Сохрани ключ в `.env` (см. ниже)
 
 ---
@@ -52,8 +52,8 @@ python3 bot.py
 
 Пример `.env`:
 ```bash
-OPENROUTER_API_KEY=sk-or-xxxxxxxx
-OPENROUTER_MODEL=openrouter/free
+OPENAI_API_KEY=sk-xxxxxxxx
+OPENAI_MODEL=gpt-4.1-mini
 DOLPHIN_SESSION_TOKEN=
 DOLPHIN_CLOUD_API_KEY=
 ```
@@ -99,8 +99,8 @@ python bot.py
 **"Профили не найдены"**
 → Проверь что Local API включён на порту 3001
 
-**API ошибка OpenRouter**
-→ Проверь ключ `OPENROUTER_API_KEY` и лимиты на openrouter.ai
+**API ошибка OpenAI**
+→ Проверь ключ `OPENAI_API_KEY`, доступ к API и биллинг в OpenAI
 
 ---
 
