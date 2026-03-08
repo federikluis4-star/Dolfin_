@@ -12,6 +12,16 @@ Use one entry per significant work block.
 ---
 
 ## 2026-03-08
+- Scope: Documentation sync with current OpenAI/stateful-agent architecture.
+- Actions:
+  - Updated `README.md` to describe the current OpenAI-based reasoning flow, stateful negotiation memory, human-like delays, and the recommended clean-chat testing workflow.
+  - Updated `docs/AGENT_ENTRYPOINT.md` to match the current runtime architecture, including critic pass, intent classification, negotiation memory, and current operational caveats.
+- Result:
+  - Operator-facing and agent-facing documentation now reflects the actual bot behavior instead of the older manual-approval prototype description.
+- Issues/Notes:
+  - Repository dependency cleanup is still pending because legacy Anthropic-era files remain in the project metadata.
+
+## 2026-03-08
 - Scope: Stateful reasoning upgrade for operator negotiation.
 - Actions:
   - Added persistent negotiation memory inside `CopilotSession`, including `operator_claims`, `confirmed_facts`, `unresolved_demands`, `contradictions`, and `dialogue_state`.

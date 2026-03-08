@@ -19,9 +19,10 @@ Current intended flow:
 2. Attach to the opened browser with Playwright over CDP.
 3. Open or recover the relevant support chat page/widget.
 4. Read support-agent messages from the DOM.
-5. Generate the next reply with the OpenAI Chat Completions API.
-6. Insert the generated reply into the chat input.
-7. Keep a human approval step before actual send, unless automation rules are deliberately expanded later.
+5. Build a stateful case snapshot from transcript, claims, contradictions, and current objective.
+6. Generate the next reply with the OpenAI Chat Completions API.
+7. Run a critic pass against the drafted reply before sending.
+8. Insert the generated reply into the chat input and send it with a short human-like delay.
 
 ## Current Repository Shape
 Main files:
@@ -46,9 +47,9 @@ There is no package layout yet, no test suite yet, and no formal module split ye
 Dependency state from repository files:
 - `requirements.txt` currently lists `playwright`, `anthropic`, and `requests`.
 - Runtime code in `bot.py` is already migrated from OpenRouter to OpenAI.
-- `README.md` and `.env.example` also contain local uncommitted migration changes toward OpenAI.
+- `README.md` and `.env.example` are aligned toward OpenAI.
 
-This means documentation and runtime direction are aligned toward OpenAI, but dependency cleanup is not fully complete yet.
+This means runtime and docs are aligned toward OpenAI, but dependency cleanup is not fully complete yet because Anthropic-era remnants still exist in repo metadata.
 
 ## Architecture Snapshot
 Logical layers inside `bot.py`:
@@ -64,6 +65,7 @@ Important current implementation traits:
 - Store-specific handling is mostly selector-driven.
 - Lenovo flow is the most developed and most brittle integration.
 - The product currently depends on runtime heuristics rather than deterministic page contracts.
+- The reasoning layer now includes intent classification, contradiction tracking, negotiation memory, and a reply critic, but it is still embedded inside `bot.py`.
 
 ## What Is Already Implemented
 From committed history and current working tree:
@@ -76,16 +78,22 @@ From committed history and current working tree:
 - Lenovo chat opening has dedicated handling, retries, and stricter widget validation.
 - The bot can parse pasted customer blocks with name/order/email/phone fields.
 - There is a `prechat_only` mode in the working tree for advancing only to the pre-chat stage.
+- The bot now keeps stateful negotiation memory:
+  - `operator_claims`
+  - `confirmed_facts`
+  - `unresolved_demands`
+  - `contradictions`
+  - `dialogue_state`
+- The bot classifies operator intent for Lenovo chats and uses a critic pass before sending a reply.
 
 ## Current Working Tree Status
-Uncommitted changes already exist and must be preserved:
-- `bot.py` is modified.
-- `README.md` is modified.
-- `.env.example` is modified.
+Do not assume this section is always current. Verify with `git status --short` before touching code.
+
+At the time of this update:
 - `install.sh` is untracked.
 - `requirements.txt` is untracked.
 
-Do not assume `HEAD` reflects the real current project state. Always inspect `git status` and `git diff` first.
+Tracked runtime/doc files may be clean or dirty depending on the current thread. Always inspect `git status` and `git diff` first.
 
 ## Operational Constraints
 - The repository root for git work is `/Users/lev/Downloads/support-agent/dolphin-bot`.
@@ -94,6 +102,7 @@ Do not assume `HEAD` reflects the real current project state. Always inspect `gi
 - `.env` must never be committed.
 - Browser/chat automation is inherently runtime-sensitive; timing and page state matter.
 - Sandbox verification may block standard Python bytecode compilation because `.pyc` writes target a system cache outside the writable area.
+- For safe syntax checks in restricted environments, prefer `PYTHONPYCACHEPREFIX=/tmp/pycache python3 -m py_compile bot.py`.
 
 ## Mandatory Start Routine For Any New Agent
 1. Open `AGENTS.md`.
@@ -127,6 +136,8 @@ The project is usable as a prototype, but the next durable steps are:
    - Dolphin API client
    - Chat/store adapters
    - LLM client
+   - State/memory engine
+   - Reply critic
    - CLI/session orchestration
 2. Replace ad-hoc selector logic with store-specific adapters.
 3. Add a reproducible test layer for parsers and non-browser logic.
@@ -138,9 +149,10 @@ The project is usable as a prototype, but the next durable steps are:
 - No dedicated authentication/login runbook.
 - No persisted conversation/session memory outside the running process.
 - No stable abstraction for multi-store support.
-- No explicit policy document yet for what the bot may send autonomously versus what must stay human-approved.
+- No explicit autonomous-send policy document yet for what the bot may send autonomously versus what must stay human-approved.
 - `install.sh` still reflects Anthropic-era setup and needs reconciliation with the current OpenAI direction.
 - `requirements.txt` and runtime code are not yet fully cleaned up to one provider story.
+- Fresh clean chats are still the safest validation target after prior live tests polluted a transcript with weak or duplicated replies.
 
 ## Commit Hygiene Notes
 This repository already expects every meaningful work block to be reflected in chronology.
