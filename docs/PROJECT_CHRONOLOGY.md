@@ -11,6 +11,31 @@ Use one entry per significant work block.
 
 ---
 
+## 2026-03-10
+- Scope: Lenovo widget recovery and pre-chat workflow stabilization to first operator handoff.
+- Actions:
+  - Hardened `get_lenovo_widget_text()` to prefer visible active widget roots over hidden stale transcript containers.
+  - Added explicit recovery handling for mixed Lenovo states such as expired panes, top-menu overlays, and `Chat with an Agent` entry screens.
+  - Tightened `classify_lenovo_widget_state()` so mixed hidden/visible Lenovo render states route to the actionable branch (`existing_pick`, `agent_entry`, or `restart`) instead of looping on stale history.
+  - Reworked Lenovo picklist clicking to prefer real `.picklistOption` elements over non-clickable ancestor containers with the same text.
+  - Rewrote `fill_lenovo_advisor_step()` around the live-proven path: detect the active frame, target the correct workflow input, submit directly, and verify the next global widget state.
+  - Updated the local runtime defaults for the active test case so the bot would not fall back to stale customer data while debugging.
+- Result:
+  - Live validation on profile `Katrin_NJ` reached the final prompt `Diana Bardian, how can we help you today?`, sent `Hello`, and received `One moment please while I transfer you to an Operator.`
+- Issues/Notes:
+  - The full `python3 bot.py` outer loop should still be revalidated from a fresh clean chat because the live fix path during this block used targeted runtime probing in addition to the code changes.
+
+## 2026-03-10
+- Scope: Agent workflow policy hardening around sandbox approvals and live browser probes.
+- Actions:
+  - Updated `AGENTS.md` to explicitly prefer normal `python3 bot.py` runs and code-side instrumentation over ad-hoc escalated CDP probes.
+  - Added repository-level guidance that the owner expects autonomous execution for ordinary run/edit/test work and that sandbox prompts are a tool-layer constraint, not a product workflow.
+  - Updated `docs/AGENT_ENTRYPOINT.md` so future agents default to runtime logs first and use live browser probes only as a short last resort.
+- Result:
+  - Future work in this repository now has a documented policy to reduce approval friction and rely less on live escalated browser diagnostics.
+- Issues/Notes:
+  - This does not remove sandbox approval prompts enforced by the Codex environment itself; it reduces how often the project should need them.
+
 ## 2026-03-08
 - Scope: Documentation sync with current OpenAI/stateful-agent architecture.
 - Actions:
@@ -154,3 +179,24 @@ Use one entry per significant work block.
   - Safer local configuration workflow established.
 - Issues/Notes:
   - Remote `origin` may be missing in local repository setup.
+
+## 2026-03-10
+- Scope: Lenovo full runtime recovery through advisor form.
+- Actions:
+  - Reworked Lenovo advisor form filling to scan live `input/textarea` controls by `aria-label`, `id`, and `type` instead of relying only on brittle CSS selectors.
+  - Tightened Lenovo widget-open handling so a visible shell without an active step re-clicks the CTA instead of looping forever on `Widget already open`.
+  - Added visible-state handoff so an already-open widget executes the detected step (`name/email/phone/order`) immediately.
+  - Validated the full `python3 bot.py` runtime on profile `Katrin_NJ` through:
+    - `Existing Orders`
+    - `General question`
+    - `Operator`
+    - `Consumer`
+    - `name`
+    - `email`
+    - `phone`
+    - `order`
+    - first outgoing chat message
+- Result:
+  - The bot now reaches Lenovo chat-ready state on the normal runtime path and can self-complete the advisor form without a manual live probe.
+- Issues/Notes:
+  - Lenovo still mixes stale transcript text with the active prompt, so final operator-ready detection remains sensitive and should continue to be monitored.

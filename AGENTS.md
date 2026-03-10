@@ -16,6 +16,17 @@ Before making changes, read:
    - Ensure commit/push policy is respected.
    - Do not push secrets (`.env`, credentials, tokens).
 3. Do not bypass hooks unless explicitly approved by repository owner.
+4. For live browser work, prefer normal runtime execution over ad-hoc escalated probes:
+   - first choice: `python3 bot.py` with stronger runtime logs;
+   - second choice: code-level instrumentation inside `bot.py`;
+   - last resort only: one-off CDP/Playwright live probes against the running browser.
+5. When working on Lenovo or other fragile chat widgets:
+   - minimize actions that require extra system approvals;
+   - avoid repeated diagnostic commands against the live browser when the same information can be surfaced through bot logs;
+   - fix the runtime path so future runs need fewer external probes.
+6. Assume the repository owner wants autonomous execution:
+   - do not stop for ordinary run/edit/test confirmations;
+   - only rely on approval prompts when the sandbox itself requires them.
 
 ## Expected workflow
 1. Implement change.

@@ -101,6 +101,10 @@ Tracked runtime/doc files may be clean or dirty depending on the current thread.
 - Git hooks are part of the required workflow and should not be bypassed.
 - `.env` must never be committed.
 - Browser/chat automation is inherently runtime-sensitive; timing and page state matter.
+- The repository owner prefers autonomous execution: do not stop for ordinary edit/run/test confirmation.
+- Sandbox approval prompts are a tool-layer constraint, not a product policy. Minimize dependence on them.
+- Prefer `python3 bot.py` plus runtime logs over one-off live CDP probes whenever the same diagnosis can be captured from the bot itself.
+- If a live browser probe is unavoidable, make it short, specific, and only after exhausting code-side logging.
 - Sandbox verification may block standard Python bytecode compilation because `.pyc` writes target a system cache outside the writable area.
 - For safe syntax checks in restricted environments, prefer `PYTHONPYCACHEPREFIX=/tmp/pycache python3 -m py_compile bot.py`.
 

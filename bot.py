@@ -501,6 +501,7 @@ class CopilotSession:
         self.confirmed_facts = []
         self.operator_claims = []
         self.contradictions = []
+        self.lenovo_widget_reset_done = False
 
     def case_name(self):
         t = (self.case_type or "").upper()
@@ -1058,6 +1059,12 @@ async def pick_best_page(context, preferred_domain=None):
         score = 0
         if not url or url == "about:blank":
             score -= 100
+        if "lenovo.com/us/vipmembers/ticketsatwork/en/contact/order-support" in url:
+            score += 500
+        elif "lenovo.com" in url:
+            score += 60
+        if "account.lenovo.com" in url:
+            score -= 120
         if preferred_domain and preferred_domain in url:
             score += 100
         if any(k in url for k in ["lenovo.com", "amazon.", "zara.com", "walmart.", "ebay."]):
@@ -1242,14 +1249,20 @@ async def type_message(page, store, text):
                     ok = await frame.evaluate(
                         """
                         (msg) => {
+                          const visible = (el) => {
+                            if (!el) return false;
+                            const r = el.getBoundingClientRect();
+                            const st = window.getComputedStyle(el);
+                            return r.width > 8 && r.height > 8 && st.visibility !== "hidden" && st.display !== "none";
+                          };
                           const candidates = [
-                            document.querySelector("#chatInput"),
-                            document.querySelector("textarea[aria-label='Type your message here']"),
                             ...Array.from(document.querySelectorAll("#insideWorkflowFieldCell input[aria-label], #insideWorkflowFieldCell textarea[aria-label]"))
                               .filter((el) => {
                                 const aria = (el.getAttribute("aria-label") || "").toLowerCase();
-                                return aria.includes("how can we help you today") && !/\\(\\d+ of \\d+\\)/.test(aria);
+                                return visible(el) && aria.includes("how can we help you today") && !/\\(\\d+ of \\d+\\)/.test(aria);
                               }),
+                            document.querySelector("#chatInput"),
+                            document.querySelector("textarea[aria-label='Type your message here']"),
                           ].filter(Boolean);
                           const ta = candidates[0];
                           if (!ta) return false;
@@ -1387,6 +1400,35 @@ async def send_message(page, store):
     try:
         frames = [page.main_frame] + list(page.frames)
         if store == "lenovo.com":
+            for frame in frames:
+                try:
+                    sent = await frame.evaluate(
+                        """
+                        () => {
+                          const visible = (el) => {
+                            if (!el) return false;
+                            const r = el.getBoundingClientRect();
+                            const st = window.getComputedStyle(el);
+                            return r.width > 8 && r.height > 8 && st.visibility !== "hidden" && st.display !== "none";
+                          };
+                          const input = Array.from(document.querySelectorAll("#insideWorkflowFieldCell input[aria-label], #insideWorkflowFieldCell textarea[aria-label], input[aria-label], textarea[aria-label]"))
+                            .find((el) => {
+                              const aria = (el.getAttribute("aria-label") || "").toLowerCase();
+                              return visible(el) && aria.includes("how can we help you today") && !/\\(\\d+ of \\d+\\)/.test(aria);
+                            });
+                          if (!input) return false;
+                          input.focus();
+                          ["keydown", "keypress", "keyup"].forEach((type) => {
+                            input.dispatchEvent(new KeyboardEvent(type, { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true }));
+                          });
+                          return true;
+                        }
+                        """
+                    )
+                    if sent:
+                        return True
+                except Exception:
+                    continue
             for frame in frames:
                 try:
                     sent = await frame.evaluate(
@@ -1626,6 +1668,7 @@ async def click_lenovo_contact_chat_cta(page):
     """
     frames = [page.main_frame] + list(page.frames)
     priority_selectors = [
+        "#inside_liveChatTab",
         "#contactServiceContainer",
         "#or_chat_customer",
         "#contactBusinessSalesContainer",
@@ -1633,6 +1676,17 @@ async def click_lenovo_contact_chat_cta(page):
         "#contactServiceLink",
         "#contactServiceLinkInfo",
     ]
+    for sel in ("#contactServiceContainer", "#or_chat_customer", "#inside_liveChatTab"):
+        try:
+            await page.wait_for_selector(sel, state="visible", timeout=3500)
+            loc = page.locator(sel).first
+            if await loc.is_visible():
+                await loc.click(force=True)
+                print(f"  ℹ️  Lenovo CTA click via waited locator: {sel}")
+                await page.wait_for_timeout(700)
+                return True
+        except Exception:
+            continue
     for frame in frames:
         for sel in priority_selectors:
             try:
@@ -1666,6 +1720,20 @@ async def click_lenovo_contact_chat_cta(page):
                     print(f"  ℹ️  Lenovo CTA click via selector: {sel}")
                     await page.wait_for_timeout(700)
                     return True
+            except Exception:
+                continue
+            try:
+                el = await frame.query_selector(sel)
+                if el and await el.is_visible():
+                    box = await el.bounding_box()
+                    if box:
+                        try:
+                            await el.click(force=True)
+                        except Exception:
+                            await page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+                        print(f"  ℹ️  Lenovo CTA click via direct element: {sel}")
+                        await page.wait_for_timeout(700)
+                        return True
             except Exception:
                 continue
         try:
@@ -1706,6 +1774,16 @@ async def click_lenovo_contact_chat_cta(page):
                 return True
         except Exception:
             continue
+    for sel in priority_selectors:
+        try:
+            loc = page.locator(sel).first
+            if await loc.is_visible():
+                await loc.click(force=True)
+                print(f"  ℹ️  Lenovo CTA click via page locator: {sel}")
+                await page.wait_for_timeout(700)
+                return True
+        except Exception:
+            continue
     return False
 
 async def restart_expired_lenovo_chat(page):
@@ -1713,6 +1791,32 @@ async def restart_expired_lenovo_chat(page):
     Если Lenovo workflow протух и показывает только START A NEW CHAT,
     перезапускаем виджет из текущего iframe-состояния.
     """
+    try:
+        widget_text = await get_lenovo_widget_text(page)
+    except Exception:
+        widget_text = ""
+
+    lowered = (widget_text or "").lower()
+    if "chat with an agent" in lowered:
+        if await click_lenovo_picklist_option(page, ["Chat with an Agent"]):
+            print("  ✅ Lenovo step: Chat with an Agent (recovery)")
+            await page.wait_for_timeout(700)
+            return True
+
+    if "start a new chat" in lowered:
+        if await click_lenovo_picklist_option(page, ["START A NEW CHAT", "Start a new chat"]):
+            print("  ✅ Lenovo step: Start a new chat")
+            await page.wait_for_timeout(700)
+            try:
+                widget_text = await get_lenovo_widget_text(page)
+            except Exception:
+                widget_text = ""
+            if "chat with an agent" in (widget_text or "").lower():
+                if await click_lenovo_picklist_option(page, ["Chat with an Agent"]):
+                    print("  ✅ Lenovo step: Chat with an Agent (after restart)")
+                    await page.wait_for_timeout(700)
+            return True
+
     frames = [page.main_frame] + list(page.frames)
     for frame in frames:
         try:
@@ -1748,40 +1852,70 @@ async def restart_expired_lenovo_chat(page):
                 return True
         except Exception:
             continue
-    # Fallback for stale/closed Powerfront state: reset from the outer Lenovo page CTA.
+    return await reset_lenovo_widget(page)
+
+async def reset_lenovo_widget(page):
+    """
+    Жёстко закрывает текущий Lenovo widget и открывает его заново через outer CTA.
+    Нужен для случаев, когда Powerfront сохраняет старый transcript между вкладками/рестартами профиля.
+    """
     try:
-        has_expired = False
-        for frame in frames:
-            try:
-                txt = await frame.evaluate("() => (document.body && document.body.innerText) ? document.body.innerText.toLowerCase() : ''")
-                if "start a new chat" in (txt or ""):
-                    has_expired = True
-                    break
-            except Exception:
-                continue
-        if has_expired:
-            try:
-                await page.evaluate(
-                    """
-                    () => {
-                      const pane = document.querySelector("#insideChatPane");
-                      if (pane) pane.classList.add("closed");
-                      const holder = document.querySelector("#inside_holder");
-                      if (holder) holder.classList.remove("chatPaneOpen");
-                      const iframe = document.querySelector("#insideChatFrame");
-                      if (iframe) iframe.style.pointerEvents = "none";
-                    }
-                    """
-                )
-            except Exception:
-                pass
-            reopened = await click_lenovo_contact_chat_cta(page)
-            if reopened:
-                print("  ✅ Lenovo step: Restart via outer chat CTA")
-                await page.wait_for_timeout(900)
-                return True
+        await page.evaluate(
+            """
+            () => {
+              const visible = (el) => {
+                if (!el) return false;
+                const r = el.getBoundingClientRect();
+                const st = window.getComputedStyle(el);
+                return r.width > 6 && r.height > 6 && st.display !== "none" && st.visibility !== "hidden";
+              };
+
+              const closers = Array.from(document.querySelectorAll(
+                "#insideCloseButton, #inside_close_button, [aria-label*='close' i], [title*='close' i], .closeChat, .chatClose, #inside_holder .close"
+              )).filter(visible);
+
+              for (const el of closers) {
+                try {
+                  const r = el.getBoundingClientRect();
+                  el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 }));
+                  el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 }));
+                  el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 }));
+                  if (typeof el.click === "function") el.click();
+                } catch (_) {}
+              }
+
+              const pane = document.querySelector("#insideChatPane");
+              if (pane) {
+                pane.classList.add("closed");
+                pane.classList.remove("open");
+              }
+              const holder = document.querySelector("#inside_holder");
+              if (holder) holder.classList.remove("chatPaneOpen");
+              const iframe = document.querySelector("#insideChatFrame");
+              if (iframe) {
+                iframe.style.pointerEvents = "none";
+                iframe.style.visibility = "hidden";
+              }
+              return true;
+            }
+            """
+        )
     except Exception:
         pass
+
+    try:
+        await page.wait_for_timeout(700)
+    except Exception:
+        pass
+
+    reopened = await click_lenovo_contact_chat_cta(page)
+    if reopened:
+        print("  ✅ Lenovo step: Widget reset via close/reopen")
+        try:
+            await page.wait_for_timeout(900)
+        except Exception:
+            pass
+        return True
     return False
 
 async def click_lenovo_picklist_option(page, labels):
@@ -1809,12 +1943,30 @@ async def click_lenovo_picklist_option(page, labels):
                   ));
                   if (!roots.length) return false;
                   const inWidget = (el) => roots.some((root) => root.contains(el));
+                  const score = (el, text) => {
+                    let s = 0;
+                    const cls = String(el.className || "").toLowerCase();
+                    if (cls.includes("picklistoption")) s += 100;
+                    if (cls.includes("picklistcontent")) s += 60;
+                    if (el.getAttribute("role") === "listitem") s += 40;
+                    if ((el.getAttribute("aria-label") || "").trim()) s += 20;
+                    s -= Math.max(0, text.length - 40);
+                    return s;
+                  };
                   const cands = Array.from(document.querySelectorAll(".picklistOption, .picklistOptionLink, .picklistContent, .text, span, div, a"))
                     .filter((el) => visible(el) && inWidget(el));
+                  const matches = [];
                   for (const el of cands) {
                     const text = norm((el.innerText || "").slice(0, 120));
-                    if (!text || text.length > 80) continue;
-                    if (!wanted.has(text)) continue;
+                    const aria = norm((el.getAttribute("aria-label") || "").slice(0, 120));
+                    const candidateText = text || aria;
+                    if (!candidateText || candidateText.length > 80) continue;
+                    if (!wanted.has(candidateText)) continue;
+                    matches.push({ el, score: score(el, candidateText) });
+                  }
+                  matches.sort((a, b) => b.score - a.score);
+                  for (const item of matches) {
+                    const el = item.el;
                     const r = el.getBoundingClientRect();
                     el.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, cancelable: true, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 }));
                     el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 }));
@@ -2042,6 +2194,11 @@ async def click_lenovo_chat_now_bar(page):
     """
     frames = [page.main_frame] + list(page.frames)
     selectors = [
+        "button:has-text('Chat Live Now')",
+        "a:has-text('Chat Live Now')",
+        "[aria-label*='Chat Live Now' i]",
+        "[title*='Chat Live Now' i]",
+        "[class*='chat' i]:has-text('Chat Live Now')",
         "button:has-text('Chat Now')",
         "a:has-text('Chat Now')",
         "[aria-label*='Chat Now' i]",
@@ -2075,7 +2232,7 @@ async def click_lenovo_chat_now_bar(page):
                     return r.top > window.innerHeight * 0.70;
                   };
                   const cands = Array.from(document.querySelectorAll("button, a, [role='button'], div, span"))
-                    .filter((el) => visible(el) && bottom(el) && /chat\\s*now/i.test((el.innerText || "") + " " + (el.getAttribute("aria-label") || "")));
+                    .filter((el) => visible(el) && bottom(el) && /chat\\s*(live\\s*)?now/i.test((el.innerText || "") + " " + (el.getAttribute("aria-label") || "")));
                   if (!cands.length) return false;
                   cands[0].dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
                   return true;
@@ -2095,6 +2252,11 @@ async def wait_for_lenovo_chat_now_bar(page, timeout_ms=45000):
     Ждём её появления, не выполняя другие действия.
     """
     selectors = [
+        "button:has-text('Chat Live Now')",
+        "a:has-text('Chat Live Now')",
+        "[aria-label*='Chat Live Now' i]",
+        "[title*='Chat Live Now' i]",
+        "[class*='chat' i]:has-text('Chat Live Now')",
         "button:has-text('Chat Now')",
         "a:has-text('Chat Now')",
         "[aria-label*='Chat Now' i]",
@@ -2135,7 +2297,7 @@ async def wait_for_lenovo_chat_now_bar(page, timeout_ms=45000):
                         return r.width > 20 && r.height > 20 && st.visibility !== 'hidden' && st.display !== 'none';
                       };
                       return Array.from(document.querySelectorAll("button, a, [role='button'], div, span"))
-                        .some(el => visible(el) && /chat\\s*now/i.test((el.innerText || "") + " " + (el.getAttribute("aria-label") || "")));
+                        .some(el => visible(el) && /chat\\s*(live\\s*)?now/i.test((el.innerText || "") + " " + (el.getAttribute("aria-label") || "")));
                     }
                     """
                 )
@@ -2146,7 +2308,10 @@ async def wait_for_lenovo_chat_now_bar(page, timeout_ms=45000):
                 continue
         if attempts in {10, 30, 60}:
             print(f"  ℹ️  Waiting for Lenovo Chat Now bar... attempt {attempts}")
-        await page.wait_for_timeout(500)
+        try:
+            await page.wait_for_timeout(500)
+        except Exception:
+            return False
     return False
 
 async def get_lenovo_widget_text_snapshot(page):
@@ -2178,22 +2343,40 @@ async def get_lenovo_widget_text_snapshot(page):
 
 async def get_lenovo_widget_text(page):
     """
-    Возвращает полный видимый текст Lenovo insideChatFrame/виджета.
+    Возвращает текст именно Lenovo chat widget, а не общей страницы order-support.
+    Сначала читаем дочерние frames, затем main frame. Fallback по body разрешаем
+    только если в тексте есть явные маркеры Lenovo advisor/chat workflow.
     """
-    frames = [page.main_frame] + list(page.frames)
+    frames = list(page.frames)
+    if page.main_frame not in frames:
+        frames.append(page.main_frame)
     for frame in frames:
         try:
             txt = await frame.evaluate(
                 """
                 () => {
-                  const roots = Array.from(document.querySelectorAll(
+                  const visible = (el) => {
+                    if (!el) return false;
+                    const r = el.getBoundingClientRect();
+                    const st = window.getComputedStyle(el);
+                    return r.width > 8 && r.height > 8 && st.display !== "none" && st.visibility !== "hidden";
+                  };
+                  const meta = [];
+                  const pane = document.querySelector("#insideChatPane");
+                  if (pane && visible(pane) && pane.classList.contains("expired")) meta.push("__chat_expired__");
+                  const workflowCell = document.querySelector("#insideWorkflowFieldCell");
+                  if (workflowCell && visible(pane) && getComputedStyle(workflowCell).display === "none") meta.push("__workflow_hidden__");
+                  const allRoots = Array.from(document.querySelectorAll(
                     "#insideChatPane, #inside_holder, #insideChatFrame, [class*='cx-widget'], [id*='cx-container'], .cx-webchat, [class*='webchat' i], [class*='genesys' i], .workflowBubble, .picklist"
                   ));
+                  const roots = allRoots.filter(visible);
                   const chunks = roots
                     .map((el) => (el.innerText || "").replace(/\\s+/g, " ").trim())
                     .filter(Boolean)
                     .sort((a, b) => b.length - a.length);
-                  return chunks[0] || "";
+                  if (!chunks.length) return "";
+                  const bodyTxt = chunks[0] || "";
+                  return `${meta.join(" ")} ${bodyTxt}`.trim();
                 }
                 """
             )
@@ -2203,7 +2386,27 @@ async def get_lenovo_widget_text(page):
             continue
         try:
             txt = await frame.evaluate("() => (document.body && document.body.innerText) ? document.body.innerText.replace(/\\s+/g, ' ').trim() : ''")
-            if txt and "lenovo" in txt.lower():
+            lowered = (txt or "").lower()
+            if txt and any(
+                marker in lowered
+                for marker in (
+                    "advisor message",
+                    "your message",
+                    "type your message here",
+                    "existing orders",
+                    "general question",
+                    "virtual assistant",
+                    "speak with an operator",
+                    "retail consumer or a small business",
+                    "what's your name",
+                    "email address",
+                    "phone number",
+                    "order number",
+                    "start a new chat",
+                    "chat has been disconnected",
+                    "trying to reconnect",
+                )
+            ):
                 return txt
         except Exception:
             continue
@@ -2213,31 +2416,56 @@ def classify_lenovo_widget_state(text):
     t = (text or "").lower()
     if not t:
         return "unknown"
-    if "start a new chat" in t:
+    top_menu_visible = (
+        "existing orders" in t
+        and ("technical support" in t or "new order / product" in t or "chat via whatsapp" in t)
+    )
+    if top_menu_visible and "__workflow_hidden__" in t:
+        return "existing_pick"
+    if (
+        "chat has been disconnected" in t
+        or "trying to reconnect" in t
+    ):
         return "restart"
-    if "what's your name" in t or "customer name" in t:
-        return "name"
-    if "email address" in t or "correct email format" in t:
-        return "email"
-    if "phone number" in t:
-        return "phone"
-    if "order number" in t:
-        return "order"
-    if "would you like to continue with our virtual assistant or speak with an operator" in t:
-        return "operator_pick"
-    if "retail consumer or a small business" in t:
-        return "consumer_pick"
+    if "__chat_expired__" in t and not top_menu_visible:
+        return "restart"
+    step_positions = []
+
+    def add_step(state, *markers):
+        pos = max((t.rfind(marker) for marker in markers if marker), default=-1)
+        if pos >= 0:
+            step_positions.append((pos, state))
+
+    add_step("restart", "start a new chat")
+    add_step("agent_entry", "chat with an agent", "click below to chat with an agent")
+    add_step("name", "what's your name", "customer name")
+    add_step("email", "email address", "correct email format")
+    add_step("phone", "phone number")
+    add_step("order", "order number")
+    add_step("operator_pick", "would you like to continue with our virtual assistant or speak with an operator")
+    add_step("consumer_pick", "retail consumer or a small business")
+    add_step("general_pick", "general question")
+    add_step("chat_ready", "type your message here")
+
+    if re.search(r"[a-z0-9][a-z0-9 .,'-]{1,80}, how can we help you today\\?", t):
+        step_positions.append((t.rfind("how can we help you today?"), "chat_ready"))
+
+    if step_positions:
+        step_positions.sort(key=lambda item: item[0])
+        latest_state = step_positions[-1][1]
+        if latest_state != "general_pick":
+            return latest_state
+    if (
+        "existing orders" in t
+        and ("technical support" in t or "new order / product" in t or "chat via whatsapp" in t)
+        and "type your message here" not in t
+    ):
+        return "existing_pick"
     if "how can we help you today?" in t and "general question" in t:
         return "general_pick"
     if "welcome to lenovo! how can we help you today?" in t and "existing orders" in t:
         return "existing_pick"
     if "how can we help you today?" in t and "type your message here" in t:
-        return "chat_ready"
-    if "how can we help you today?" in t and "your message" in t and "existing orders" not in t and "general question" not in t:
-        return "chat_ready"
-    if "how can we help you today?" in t and "(4 of 4)" in t:
-        return "order"
-    if re.search(r"[a-z0-9][a-z0-9 .,'-]{1,80}, how can we help you today\\?", t) and "existing orders" not in t and "general question" not in t:
         return "chat_ready"
     return "unknown"
 
@@ -2247,23 +2475,34 @@ async def is_lenovo_widget_open(page):
     """
     try:
         widget_text = await get_lenovo_widget_text(page)
-        if widget_text:
+        visible_state = await detect_lenovo_visible_state(page)
+        if visible_state in {
+            "agent_entry",
+            "existing_pick",
+            "general_pick",
+            "operator_pick",
+            "consumer_pick",
+            "name",
+            "email",
+            "phone",
+            "order",
+            "chat_ready",
+            "restart",
+        }:
             return True
-    except Exception:
-        pass
-    try:
-        visible_iframe = await page.evaluate(
-            """
-            () => {
-              const el = document.querySelector("#insideChatFrame");
-              if (!el) return false;
-              const r = el.getBoundingClientRect();
-              const st = window.getComputedStyle(el);
-              return r.width > 40 && r.height > 40 && st.display !== "none" && st.visibility !== "hidden";
-            }
-            """
-        )
-        if visible_iframe:
+        if widget_text and classify_lenovo_widget_state(widget_text) in {
+            "agent_entry",
+            "existing_pick",
+            "general_pick",
+            "operator_pick",
+            "consumer_pick",
+            "name",
+            "email",
+            "phone",
+            "order",
+            "chat_ready",
+            "restart",
+        }:
             return True
     except Exception:
         pass
@@ -2291,10 +2530,12 @@ async def is_lenovo_widget_open(page):
             found = await frame.evaluate(
                 """
                 () => {
-                  const txt = (document.body && document.body.innerText ? document.body.innerText : "").toLowerCase();
+                  const root = document.querySelector("#insideChatPane, #inside_holder, #insideChatFrame");
+                  const txt = (root && root.innerText ? root.innerText : "").toLowerCase();
                   return txt.includes("lenovo online sales support")
                     || txt.includes("how can we help you today")
-                    || txt.includes("would you like to continue with our virtual assistant");
+                    || txt.includes("would you like to continue with our virtual assistant")
+                    || txt.includes("existing orders");
                 }
                 """
             )
@@ -2402,6 +2643,14 @@ def normalize_customer_phone(value):
         return f"{digits[:3]}-{digits[3:6]}-{digits[6:]}"
     return digits
 
+def normalize_lenovo_phone(value):
+    digits = re.sub(r"\D+", "", value or "")
+    if len(digits) == 10:
+        return f"+1{digits}"
+    if len(digits) == 11 and digits.startswith("1"):
+        return f"+{digits}"
+    return digits
+
 def normalize_order_num(value):
     return re.sub(r"\s+", "", (value or "").strip())
 
@@ -2410,177 +2659,358 @@ async def fill_lenovo_advisor_step(page, session, forced_state=None):
     LenovoAdvisor часто показывает одно поле на шаг.
     Смотрим текст текущего шага и вбиваем соответствующее значение.
     """
-    frames = [page.main_frame] + list(page.frames)
+    frames = [page.main_frame] + [fr for fr in page.frames if fr != page.main_frame]
+    state = forced_state or classify_lenovo_widget_state(await get_lenovo_widget_text(page))
+    expected_next = {
+        "name": {"email"},
+        "email": {"phone"},
+        "phone": {"order"},
+        "order": {"chat_ready", "restart"},
+    }
+    if state not in {"name", "email", "phone", "order"}:
+        return False
+
+    target_value = ""
+    if state == "name":
+        target_value = normalize_customer_name(session.customer_name)
+    elif state == "order":
+        target_value = normalize_order_num(session.order_num)
+    elif state == "email":
+        target_value = normalize_customer_email(session.customer_email)
+    elif state == "phone":
+        target_value = normalize_lenovo_phone(session.customer_phone)
+
+    if not target_value:
+        return False
+
+    selectors_by_state = {
+        "name": [
+            "input[aria-label*=\"what's your name\" i]",
+            "input[aria-label*='(1 of 4)' i]",
+            "#insideWorkflowFieldCell input",
+            "input[aria-label*='name' i]",
+            "input[placeholder*='name' i]",
+            "#insideWorkflowFieldCell textarea",
+        ],
+        "email": [
+            "input[aria-label*='email' i]",
+            "#insideWorkflowFieldCell input[type='email']",
+            "#insideWorkflowFieldCell input",
+            "input[placeholder*='email' i]",
+        ],
+        "phone": [
+            "input[aria-label='xxx-xxx-xxxx']",
+            "#insideWorkflowFieldCell input[type='tel']",
+            "input[aria-label*='phone' i]",
+            "#insideWorkflowFieldCell input",
+            "input[placeholder*='phone' i]",
+        ],
+        "order": [
+            "input[aria-label*='order number' i]",
+            "#insideWorkflowFieldCell input",
+            "input[aria-label*='order' i]",
+            "input[placeholder*='order' i]",
+        ],
+    }
+
+    step_markers = {
+        "name": "what's your name",
+        "email": "email address",
+        "phone": "phone number",
+        "order": "order number",
+    }
+
+    visible_candidate = None
+    hidden_candidate = None
+
+    def control_matches(target_state, meta):
+        element_id = (meta.get("id") or "").strip().lower()
+        element_type = (meta.get("type") or "").strip().lower()
+        aria_label = (meta.get("aria") or "").strip().lower()
+        placeholder = (meta.get("placeholder") or "").strip().lower()
+        name_attr = (meta.get("name") or "").strip().lower()
+        hay = " ".join(part for part in [element_id, element_type, aria_label, placeholder, name_attr] if part)
+        if element_id == "chatinput" or element_type == "file":
+            return False
+        if target_state == "name":
+            return "what's your name" in hay or "(1 of 4)" in hay or re.search(r"\bname\b", hay)
+        if target_state == "email":
+            return "email" in hay or element_id == "emailinput" or element_type == "email"
+        if target_state == "phone":
+            return "phone" in hay or "xxx-xxx-xxxx" in hay or element_type == "tel"
+        if target_state == "order":
+            return "order" in hay
+        return False
+
+    require_step_marker = forced_state is None
+
     for frame in frames:
+        try:
+            controls = await frame.query_selector_all("input, textarea")
+        except Exception:
+            controls = []
+        for el in controls:
+            try:
+                meta = {
+                    "id": await el.get_attribute("id") or "",
+                    "type": await el.get_attribute("type") or "",
+                    "name": await el.get_attribute("name") or "",
+                    "aria": await el.get_attribute("aria-label") or "",
+                    "placeholder": await el.get_attribute("placeholder") or "",
+                }
+                if not control_matches(state, meta):
+                    continue
+                if await el.is_visible():
+                    visible_candidate = (frame, el, f"scan:{meta}")
+                    break
+                if not hidden_candidate:
+                    hidden_candidate = (frame, el, f"scan:{meta}")
+            except Exception:
+                continue
+        if visible_candidate:
+            break
+
         try:
             txt = await frame.evaluate("() => (document.body && document.body.innerText) ? document.body.innerText.lower() : ''")
         except Exception:
             continue
-
-        state = forced_state or classify_lenovo_widget_state(txt)
-        target_value = ""
-        if state == "name":
-            target_value = normalize_customer_name(session.customer_name)
-        elif state == "order":
-            target_value = normalize_order_num(session.order_num)
-        elif state == "email":
-            target_value = normalize_customer_email(session.customer_email)
-        elif state == "phone":
-            target_value = normalize_customer_phone(session.customer_phone)
-
-        if not target_value:
+        if require_step_marker and step_markers[state] not in txt:
             continue
-
-        selectors_by_state = {
-            "name": [
-                "#insideWorkflowFieldCell input:visible",
-                "input[aria-label*='name' i]:visible",
-                "input[placeholder*='name' i]:visible",
-                "#insideWorkflowFieldCell textarea:visible",
-            ],
-            "email": [
-                "#insideWorkflowFieldCell input[type='email']:visible",
-                "input[aria-label*='email' i]:visible",
-                "#insideWorkflowFieldCell input:visible",
-                "input[placeholder*='email' i]:visible",
-            ],
-            "phone": [
-                "input[aria-label='xxx-xxx-xxxx']:visible",
-                "#insideWorkflowFieldCell input[type='tel']:visible",
-                "input[aria-label*='phone' i]:visible",
-                "#insideWorkflowFieldCell input:visible",
-                "input[placeholder*='phone' i]:visible",
-            ],
-            "order": [
-                "input[aria-label*='order number' i]:visible",
-                "#insideWorkflowFieldCell input:visible",
-                "input[aria-label*='order' i]:visible",
-                "input[placeholder*='order' i]:visible",
-            ],
-        }
 
         for sel in selectors_by_state.get(state, []):
             try:
                 el = await frame.query_selector(sel)
-                if el:
-                    try:
-                        element_id = (await el.get_attribute("id") or "").strip().lower()
-                        aria_label = (await el.get_attribute("aria-label") or "").strip().lower()
-                        placeholder = (await el.get_attribute("placeholder") or "").strip().lower()
-                        if element_id == "chatinput":
-                            continue
-                        if state == "email" and "email" not in f"{aria_label} {placeholder}" and "insideworkflowfieldcell" not in sel.lower():
-                            continue
-                        if state == "phone" and "phone" not in f"{aria_label} {placeholder}" and "insideworkflowfieldcell" not in sel.lower():
-                            continue
-                        if state == "order" and "order" not in f"{aria_label} {placeholder}" and "insideworkflowfieldcell" not in sel.lower():
-                            continue
-                    except Exception:
-                        pass
-                    await el.click(force=True)
-                    try:
-                        await el.fill("")
-                    except Exception:
-                        pass
-                    try:
-                        await el.type(target_value, delay=35)
-                    except Exception:
-                        await el.fill(target_value)
-                    try:
-                        await el.dispatch_event("input")
-                        await el.dispatch_event("change")
-                    except Exception:
-                        pass
-                    try:
-                        await frame.evaluate(
-                            """
-                            (value) => {
-                              const active = document.activeElement;
-                              if (!active) return false;
-                              active.focus();
-                              active.dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true }));
-                              active.dispatchEvent(new KeyboardEvent("keyup", { key: "End", bubbles: true }));
-                              active.dispatchEvent(new InputEvent("input", { bubbles: true, data: value }));
-                              active.dispatchEvent(new Event("change", { bubbles: true }));
-                              return true;
-                            }
-                            """,
-                            target_value,
-                        )
-                    except Exception:
-                        pass
-                    try:
-                        print(f"  ✅ Lenovo step: {state} -> {target_value}")
-                    except Exception:
-                        pass
-                    await page.wait_for_timeout(250)
-                    try:
-                        submitted = await frame.evaluate(
-                            """
-                            () => {
-                              const visible = (el) => {
-                                const r = el.getBoundingClientRect();
-                                const st = window.getComputedStyle(el);
-                                return r.width > 5 && r.height > 5 && st.display !== "none" && st.visibility !== "hidden";
-                              };
-                              const footer = document.querySelector("#insideChatPaneFooter") || document;
-                              const cands = Array.from(footer.querySelectorAll("button, [role='button'], div, span, a"))
-                                .filter((el) => visible(el) && el.id !== "chatMenuButton");
-                              for (const el of cands) {
-                                const sig = [
-                                  el.id || "",
-                                  el.className || "",
-                                  el.getAttribute("aria-label") || "",
-                                  el.getAttribute("title") || "",
-                                  el.innerText || "",
-                                ].join(" ").toLowerCase();
-                                if (!/(send|submit|next|continue|arrow|workflow)/.test(sig) && el.id !== "insideSendButton") {
-                                  continue;
-                                }
-                                const r = el.getBoundingClientRect();
-                                el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 }));
-                                el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 }));
-                                el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 }));
-                                if (typeof el.click === "function") el.click();
-                                return true;
-                              }
-                              const cells = Array.from(document.querySelectorAll("#insideChatFooterTable td, #insideChatPaneFooter td"))
-                                .filter((el) => visible(el) && !/chatMenuButtonCell/i.test(el.id || ""));
-                              for (const el of cells) {
-                                const r = el.getBoundingClientRect();
-                                if (r.width < 4) continue;
-                                el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 }));
-                                el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 }));
-                                el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 }));
-                                return true;
-                              }
-                              return false;
-                            }
-                            """
-                        )
-                        if not submitted:
-                            await el.press("Enter")
-                            await page.wait_for_timeout(250)
-                    except Exception:
-                        try:
-                            await el.press("Enter")
-                            await page.wait_for_timeout(250)
-                        except Exception:
-                            pass
-                    return True
+                if not el:
+                    continue
+                element_id = (await el.get_attribute("id") or "").strip().lower()
+                aria_label = (await el.get_attribute("aria-label") or "").strip().lower()
+                placeholder = (await el.get_attribute("placeholder") or "").strip().lower()
+                if element_id == "chatinput":
+                    continue
+                if state == "name" and "what's your name" not in f"{aria_label} {placeholder}" and "(1 of 4)" not in f"{aria_label} {placeholder}" and "insideworkflowfieldcell" not in sel.lower():
+                    continue
+                if state == "email" and "email" not in f"{aria_label} {placeholder}" and "insideworkflowfieldcell" not in sel.lower():
+                    continue
+                if state == "phone" and "phone" not in f"{aria_label} {placeholder}" and "xxx-xxx-xxxx" not in aria_label and "insideworkflowfieldcell" not in sel.lower():
+                    continue
+                if state == "order" and "order" not in f"{aria_label} {placeholder}" and "insideworkflowfieldcell" not in sel.lower():
+                    continue
+                if await el.is_visible():
+                    visible_candidate = (frame, el, sel)
+                    break
+                if not hidden_candidate:
+                    hidden_candidate = (frame, el, sel)
             except Exception:
                 continue
+        if visible_candidate:
+            break
+
+    if visible_candidate:
+        frame, el, sel = visible_candidate
+        print(f"  ℹ️  Lenovo advisor visible candidate: {state} via {sel}")
+        try:
+            await el.click(force=True)
+        except Exception:
+            pass
+        try:
+            await el.fill("")
+        except Exception:
+            pass
+        try:
+            await el.type(target_value, delay=35)
+        except Exception:
+            try:
+                await el.fill(target_value)
+            except Exception:
+                return False
+        try:
+            current_val = await el.input_value()
+            if (current_val or "").strip() != target_value.strip():
+                print(f"  ℹ️  Lenovo advisor retry fill: {state} current='{current_val}' target='{target_value}'")
+                try:
+                    await el.fill(target_value)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        print(f"  ✅ Lenovo step: {state} -> {target_value}")
+        await page.wait_for_timeout(250)
+        try:
+            await el.press("Enter")
+        except Exception:
+            try:
+                await frame.evaluate(
+                    """
+                    (selector) => {
+                      const el = document.querySelector(selector) || document.activeElement;
+                      if (!el) return false;
+                      if (typeof el.focus === "function") el.focus();
+                      ["keydown", "keypress", "keyup"].forEach((type) => {
+                        el.dispatchEvent(new KeyboardEvent(type, { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true }));
+                      });
+                      return true;
+                    }
+                    """,
+                    sel,
+                )
+            except Exception:
+                return False
+    elif hidden_candidate:
+        frame, el, sel = hidden_candidate
+        print(f"  ℹ️  Lenovo advisor hidden candidate: {state} via {sel}")
+        try:
+            await el.evaluate(
+                """
+                (el, value) => {
+                  if (typeof el.focus === "function") el.focus();
+                  el.value = "";
+                  el.dispatchEvent(new Event("input", { bubbles: true }));
+                  el.value = value;
+                  el.dispatchEvent(new InputEvent("input", { bubbles: true, data: value }));
+                  el.dispatchEvent(new Event("change", { bubbles: true }));
+                  ["keydown", "keypress", "keyup"].forEach((type) => {
+                    el.dispatchEvent(new KeyboardEvent(type, { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true }));
+                  });
+                  return true;
+                }
+                """,
+                target_value,
+            )
+            print(f"  ✅ Lenovo step: {state} -> {target_value}")
+        except Exception:
+            return False
+    else:
+        print(f"  ℹ️  Lenovo advisor no candidate for state={state}")
+        for idx, frame in enumerate(frames):
+            try:
+                controls = await frame.evaluate(
+                    """
+                    () => Array.from(document.querySelectorAll('input, textarea'))
+                      .slice(0, 12)
+                      .map((el) => ({
+                        tag: el.tagName.toLowerCase(),
+                        id: el.id || '',
+                        type: el.getAttribute('type') || '',
+                        name: el.getAttribute('name') || '',
+                        aria: el.getAttribute('aria-label') || '',
+                        placeholder: el.getAttribute('placeholder') || '',
+                        classes: el.className || '',
+                        display: getComputedStyle(el).display,
+                        visibility: getComputedStyle(el).visibility,
+                      }))
+                    """,
+                )
+                if controls:
+                    print(f"  ℹ️  Lenovo advisor controls frame#{idx}: {controls[:6]}")
+            except Exception:
+                continue
+        return False
+
+    for _ in range(16):
+        try:
+            frame_text = await frame.evaluate("() => (document.body && document.body.innerText) ? document.body.innerText.toLowerCase() : ''")
+        except Exception:
+            frame_text = ""
+        if state == "name" and ("email address" in frame_text or "correct email format" in frame_text):
+            return True
+        if state == "email" and "phone number" in frame_text:
+            return True
+        if state == "phone" and "order number" in frame_text:
+            return True
+        if state == "order" and "how can we help you today?" in frame_text:
+            return True
+        next_state = classify_lenovo_widget_state(await get_lenovo_widget_text(page))
+        if next_state in expected_next.get(state, set()):
+            return True
+        await page.wait_for_timeout(200)
     return False
 
-async def advance_lenovo_widget_state(page, session):
+async def detect_lenovo_visible_state(page):
+    """
+    Определяет активный Lenovo step по реально видимому DOM,
+    а не только по transcript text.
+    """
+    frames = [page.main_frame] + [fr for fr in page.frames if fr != page.main_frame]
+    checks = [
+        ("chat_ready", [
+            "#insideWorkflowFieldCell input[aria-label*='how can we help you today' i]",
+            "#insideWorkflowFieldCell textarea[aria-label*='how can we help you today' i]",
+            "input[aria-label*='how can we help you today' i]",
+            "textarea[aria-label*='how can we help you today' i]",
+        ]),
+        ("name", [
+            "input[aria-label*=\"what's your name\" i]",
+            "input[aria-label*='(1 of 4)' i]",
+            "#insideWorkflowFieldCell input[aria-label*='name' i]",
+        ]),
+        ("email", [
+            "input[aria-label*='email' i]",
+            "#insideWorkflowFieldCell input[type='email']",
+        ]),
+        ("phone", [
+            "input[aria-label='xxx-xxx-xxxx']",
+            "#insideWorkflowFieldCell input[type='tel']",
+            "input[aria-label*='phone' i]",
+        ]),
+        ("order", [
+            "input[aria-label*='order number' i]",
+            "#insideWorkflowFieldCell input",
+        ]),
+    ]
+    for frame in frames:
+        for state, selectors in checks:
+            for sel in selectors:
+                try:
+                    el = await frame.query_selector(sel)
+                    if el and await el.is_visible():
+                        return state
+                except Exception:
+                    continue
+        try:
+            options = await frame.evaluate(
+                """
+                () => {
+                  const visible = (el) => {
+                    const r = el.getBoundingClientRect();
+                    const st = window.getComputedStyle(el);
+                    return r.width > 8 && r.height > 8 && st.visibility !== "hidden" && st.display !== "none";
+                  };
+                  return Array.from(document.querySelectorAll(".picklistOption"))
+                    .filter(visible)
+                    .map(el => ((el.innerText || el.getAttribute("aria-label") || "").replace(/\\s+/g, " ").trim().toLowerCase()))
+                    .filter(Boolean);
+                }
+                """
+            )
+        except Exception:
+            options = []
+        if not options:
+            continue
+        if "chat with an agent" in options:
+            return "agent_entry"
+        if "existing orders" in options or "existing order" in options:
+            return "existing_pick"
+        if "general question" in options:
+            return "general_pick"
+        if "operator" in options or "speak with an operator" in options:
+            return "operator_pick"
+        if "consumer" in options:
+            return "consumer_pick"
+    return None
+
+async def advance_lenovo_widget_state(page, session, forced_state=None):
     """
     Читает текущий prompt Lenovo widget и выбирает следующее действие.
     """
     widget_text = await get_lenovo_widget_text(page)
-    state = classify_lenovo_widget_state(widget_text)
+    state = forced_state or await detect_lenovo_visible_state(page) or classify_lenovo_widget_state(widget_text)
 
     if state == "restart":
         return await restart_expired_lenovo_chat(page)
+    if state == "agent_entry":
+        if await click_lenovo_picklist_option(page, ["Chat with an Agent"]):
+            print("  ✅ Lenovo step: Chat with an Agent")
+            return True
     if state == "existing_pick":
         if await click_lenovo_picklist_option(page, ["Existing Orders", "Existing order"]):
             print("  ✅ Lenovo step: Existing Orders")
@@ -2599,6 +3029,11 @@ async def advance_lenovo_widget_state(page, session):
             return True
     if state in {"name", "email", "phone", "order"}:
         return await fill_lenovo_advisor_step(page, session, forced_state=state)
+    if state == "unknown":
+        for fallback_state in ("name", "email", "phone", "order"):
+            if await fill_lenovo_advisor_step(page, session, forced_state=fallback_state):
+                print(f"  ℹ️  Lenovo fallback step: {fallback_state}")
+                return True
     return False
 
 async def collect_chat_observation(page, store, session):
@@ -2613,7 +3048,7 @@ async def collect_chat_observation(page, store, session):
         "widget_text_excerpt": (widget_text or "")[:600],
         "last_agent_message": session.last_agent_msg or "",
         "message_count": session.message_count,
-        "chat_ready": bool(operator_open and state in {"chat_ready", "unknown"}),
+        "chat_ready": bool(operator_open and state == "chat_ready"),
     }
 
 async def advance_lenovo_until_chat_ready(page, session, max_steps=8):
@@ -2626,8 +3061,8 @@ async def advance_lenovo_until_chat_ready(page, session, max_steps=8):
         if await is_operator_chat_open(page, "lenovo.com"):
             return True
         widget_text = await get_lenovo_widget_text(page)
-        state = classify_lenovo_widget_state(widget_text)
-        if state not in {"existing_pick", "general_pick", "operator_pick", "consumer_pick", "name", "email", "phone", "order", "restart"}:
+        state = await detect_lenovo_visible_state(page) or classify_lenovo_widget_state(widget_text)
+        if state not in {"agent_entry", "existing_pick", "general_pick", "operator_pick", "consumer_pick", "name", "email", "phone", "order", "restart"}:
             break
         step_progress = await advance_lenovo_widget_state(page, session)
         if not step_progress:
@@ -2767,6 +3202,16 @@ async def prepare_chat_for_operator(page, store, session):
 
     # Попытка открыть/развернуть виджет чата
     if store == "lenovo.com":
+        if not getattr(session, "lenovo_widget_reset_done", False):
+            try:
+                current_widget_text = await get_lenovo_widget_text(page)
+                current_widget_state = classify_lenovo_widget_state(current_widget_text)
+            except Exception:
+                current_widget_text = ""
+                current_widget_state = "unknown"
+            if current_widget_state in {"name", "email", "phone", "order", "chat_ready", "restart"}:
+                if await reset_lenovo_widget(page):
+                    session.lenovo_widget_reset_done = True
         await click_lenovo_contact_chat_cta(page)
     await click_first_visible(page, [
         "#contactServiceContainer",
@@ -2928,9 +3373,31 @@ async def try_open_operator_flow(page, store, session):
                     print("  ✅ Lenovo step: Chat launcher")
                     await safe_wait(300)
         else:
-            print("  ✅ Lenovo step: Widget already open")
+            widget_text = await get_lenovo_widget_text(page)
+            visible_state = await detect_lenovo_visible_state(page) or classify_lenovo_widget_state(widget_text)
+            print(f"  ✅ Lenovo step: Widget already open ({visible_state})")
+            if visible_state in {
+                "agent_entry",
+                "existing_pick",
+                "general_pick",
+                "operator_pick",
+                "consumer_pick",
+                "name",
+                "email",
+                "phone",
+                "order",
+                "restart",
+            }:
+                if await advance_lenovo_widget_state(page, session, forced_state=visible_state):
+                    await safe_wait(350)
+                    if await is_operator_chat_open(page, store):
+                        return
+            if visible_state == "unknown" and await click_lenovo_contact_chat_cta(page):
+                print("  ℹ️  Lenovo shell open without active step; re-clicked CTA")
+                await safe_wait(500)
             if progressed and await is_operator_chat_open(page, store):
                 return
+        return
     else:
         # Для остальных магазинов пробуем launcher как раньше.
         if await wait_for_floating_chat_launcher(page, timeout_ms=8000):
@@ -2954,110 +3421,6 @@ async def try_open_operator_flow(page, store, session):
             "[aria-label*='chat' i]",
             "[class*='chat' i] button",
         ], pause_ms=500, step_name="Contact/Support entry")
-
-    if store == "lenovo.com":
-        # Для кейсов по проблемам с доставкой/возвратом всегда идём через Existing Orders.
-        existing_clicked = await click_step([
-            "button:has-text('Existing Orders')",
-            "button:has-text('Existing order')",
-            "button:has-text('Order support')",
-            "a:has-text('Existing Orders')",
-            "a:has-text('Existing order')",
-        ], pause_ms=500, step_name="Existing Orders")
-        existing_exact = await click_lenovo_button_exact(page, ["Existing Orders", "Existing order"])
-        if not existing_exact:
-            existing_exact = await click_lenovo_picklist_option(page, ["Existing Orders", "Existing order"])
-        if existing_exact:
-            print("  ✅ Lenovo step: Existing Orders")
-        existing_any = existing_clicked or existing_exact
-
-        # В окне LenovoAdvisor выбираем раздел General question.
-        general_clicked = await click_step([
-            "button:has-text('General question')",
-            "a:has-text('General question')",
-            "div[role='button']:has-text('General question')",
-            "li:has-text('General question')",
-        ], pause_ms=350, step_name="General question")
-        if not general_clicked:
-            general_clicked = await click_lenovo_button_exact(page, ["General question"])
-        if not general_clicked:
-            general_clicked = await click_lenovo_picklist_option(page, ["General question"])
-        if general_clicked:
-            print("  ✅ Lenovo step: General question")
-        if not general_clicked:
-            await click_lenovo_option(page, "General question")
-
-        # Следующий шаг LenovoAdvisor: переключаемся на живого оператора.
-        operator_clicked = await click_step([
-            "button:has-text('Operator')",
-            "a:has-text('Operator')",
-            "div[role='button']:has-text('Operator')",
-            "li:has-text('Operator')",
-        ], pause_ms=400, step_name="Operator")
-        if not operator_clicked:
-            operator_clicked = await click_lenovo_button_exact(page, ["Operator"])
-        if not operator_clicked:
-            operator_clicked = await click_lenovo_picklist_option(page, ["Operator", "Speak with an operator"])
-        if operator_clicked:
-            print("  ✅ Lenovo step: Operator")
-        if not operator_clicked:
-            await click_lenovo_option(page, "Operator")
-        # Жесткий приоритет именно для экрана "Virtual Assistant vs Operator".
-        await click_by_text_deep(page, [
-            "speak with an operator",
-            "operator",
-        ])
-        await safe_wait(350)
-
-        # Шаг LenovoAdvisor: Consumer vs Small Business.
-        consumer_clicked = await click_step([
-            "button:has-text('Consumer')",
-            "a:has-text('Consumer')",
-            "div[role='button']:has-text('Consumer')",
-            "li:has-text('Consumer')",
-        ], pause_ms=350, step_name="Consumer")
-        if not consumer_clicked:
-            consumer_clicked = await click_lenovo_button_exact(page, ["Consumer"])
-        if not consumer_clicked:
-            consumer_clicked = await click_lenovo_picklist_option(page, ["Consumer"])
-        if consumer_clicked:
-            print("  ✅ Lenovo step: Consumer")
-        if not consumer_clicked:
-            await click_lenovo_option(page, "Consumer")
-
-        if not existing_any and not general_clicked and not operator_clicked and not consumer_clicked:
-            snapshot = await get_lenovo_widget_text_snapshot(page)
-            if snapshot:
-                print(f"  ℹ️  Lenovo widget snapshot: {snapshot!r}")
-            else:
-                print("  ℹ️  Lenovo widget snapshot: no widget text captured")
-
-        # Автозаполнение шагов LenovoAdvisor (name/order/email), если поля присутствуют.
-        await fill_first_input(page, [
-            "input[placeholder*='name' i]",
-            "input[name*='name' i]",
-            "input[id*='name' i]",
-            "textarea[placeholder*='name' i]",
-        ], session.customer_name)
-        await fill_first_input(page, [
-            "input[placeholder*='order' i]",
-            "input[name*='order' i]",
-            "input[id*='order' i]",
-            "textarea[placeholder*='order' i]",
-        ], session.order_num)
-        await fill_first_input(page, [
-            "input[type='email']",
-            "input[placeholder*='email' i]",
-            "input[name*='email' i]",
-            "input[id*='email' i]",
-        ], session.customer_email)
-        await fill_first_input(page, [
-            "input[type='tel']",
-            "input[placeholder*='phone' i]",
-            "input[name*='phone' i]",
-            "input[id*='phone' i]",
-        ], session.customer_phone)
-        await fill_lenovo_advisor_step(page, session)
 
     await click_step([
         "button:has-text('Continue')",
@@ -3101,20 +3464,9 @@ async def is_chat_input_ready(page, store):
         frames = [page.main_frame] + list(page.frames)
         if store == "lenovo.com":
             widget_text = (await get_lenovo_widget_text(page)).lower()
-            if "how can we help you today?" in widget_text and "existing orders" not in widget_text and "general question" not in widget_text:
+            widget_state = classify_lenovo_widget_state(widget_text)
+            if widget_state == "chat_ready":
                 return True
-            for frame in frames:
-                # Для Lenovo требуем признаки Genesys-виджета, а не любое поле на странице.
-                widget = await frame.query_selector(
-                    "[class*='cx-widget'], [id*='cx-container'], .cx-webchat, [class*='webchat' i], [class*='genesys' i], #insideChatPane, #inside_holder"
-                )
-                if not widget:
-                    continue
-                chat_input = await frame.query_selector(
-                    "textarea[placeholder='Type your message here'], #chatInput, .cx-input textarea, [class*='cx-input'] textarea, [contenteditable='true']"
-                )
-                if chat_input:
-                    return True
             return False
 
         ready_selectors = [
@@ -3139,9 +3491,11 @@ async def is_operator_chat_open(page, store):
     frames = [page.main_frame] + list(page.frames)
     if store == "lenovo.com":
         widget_text = (await get_lenovo_widget_text(page)).lower()
-        widget_state = classify_lenovo_widget_state(widget_text)
+        widget_state = await detect_lenovo_visible_state(page) or classify_lenovo_widget_state(widget_text)
         if widget_state == "chat_ready":
             return True
+        if widget_state in {"agent_entry", "existing_pick", "general_pick", "operator_pick", "consumer_pick", "name", "email", "phone", "order", "restart"}:
+            return False
         for frame in frames:
             try:
                 has_widget = await frame.query_selector(
@@ -3150,7 +3504,7 @@ async def is_operator_chat_open(page, store):
                 has_chat_input = await frame.query_selector(
                     "textarea[placeholder='Type your message here'], #chatInput, .cx-input textarea, [class*='cx-input'] textarea, [contenteditable='true'], #insideWorkflowFieldCell input[aria-label*='how can we help you today' i], #insideWorkflowFieldCell textarea[aria-label*='how can we help you today' i]"
                 )
-                if has_widget and has_chat_input and widget_state in {"chat_ready", "unknown"}:
+                if has_widget and has_chat_input and widget_state == "chat_ready":
                     return True
             except Exception:
                 continue
