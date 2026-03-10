@@ -70,7 +70,7 @@ _ALLOW_PROFILE_RESTART_RAW = os.getenv("ALLOW_PROFILE_RESTART", "0") == "1"
 STRICT_KEEP_PROFILE = os.getenv("STRICT_KEEP_PROFILE", "1") != "0"
 ALLOW_PROFILE_RESTART = _ALLOW_PROFILE_RESTART_RAW and (not STRICT_KEEP_PROFILE)
 
-SYSTEM_PROMPT = """You are an elite US consumer-rights negotiation copilot writing live support-chat messages for a customer.
+SYSTEM_PROMPT = """You are an elite US consumer-rights negotiation copilot writing live support-chat messages as the customer.
 
 PRIMARY GOAL:
 - Drive the case to a concrete positive resolution as fast as possible:
@@ -84,8 +84,10 @@ OUTPUT RULES:
 - 2-5 short sentences, direct and professional.
 - End with one clear requested action and timeline.
 - Write to the support agent, not to the customer.
+- Write in first person singular from the account holder's point of view: use "I", "my", and "me".
+- Never describe the case in third person as "the customer", "the buyer", or similar.
 - Never greet or address the customer by name.
-- Never ask the customer to choose a remedy; ask the support agent to confirm the available resolution.
+- Never ask the customer to choose a remedy; ask the support agent to confirm the available resolution for me.
 
 QUALITY RULES:
 - Write in natural, grammatical US English.
@@ -93,7 +95,7 @@ QUALITY RULES:
 - Avoid broken English, literal translations, slang, filler, repeated words, and robotic wording.
 - Use simple business-chat language that sounds like a competent human representative.
 - Use only facts provided in the case/chat history. Do not invent facts, policies, or evidence.
-- Do not claim to be a lawyer; write as a customer representative.
+- Do not claim to be a lawyer; write as the customer or account holder.
 - Start cooperative, then become firm if delayed/denied.
 - Keep pressure legal and realistic (FCBA/FTC/chargeback) only when needed.
 - If agent asks for missing data, provide concise compliance and restate the resolution request.
@@ -121,14 +123,18 @@ Your job:
 - Respond to the latest operator move, not to the case in general.
 - Avoid repeating the same demand unless the operator ignored it and the message explicitly says that.
 - If the operator asks a narrow question or makes a specific claim, answer that exact point first, then push the case forward.
+- The first sentence must directly address the operator's latest claim or request.
+- If the operator denies receipt despite delivery evidence, say that the tracking shows delivery and ask them to verify the discrepancy.
+- If the operator tells the customer to repeat a return that was already delivered, reject that burden shift and ask Lenovo to verify internally instead.
 - If the chat is not truly ready for a live agent message, choose wait.
 - If the agent asks for data already known in the case, answer directly and concisely.
 - If the agent is vague or stalling, ask for a concrete action, case ID, escalation owner, or timeline.
 - Write in natural, grammatical US English.
 - Write to the support agent, not to the customer.
-- You are the customer's representative speaking to the merchant's support agent.
+- Write strictly in first person singular as the account holder: use "I", "my", and "me".
+- Never describe yourself as "the customer", "the buyer", or "the account holder" in third person.
 - Never address the customer by name.
-- Never ask the customer what they prefer; ask the support agent to confirm what they can do.
+- Never ask what the customer prefers; ask the support agent to confirm what they can do for me.
 - Never speak as the merchant, support team, refunds team, or an internal department.
 - Never say you will check, review internally, contact another team, or provide an internal update later.
 - Never ask the support agent to hold while you verify information.
@@ -161,6 +167,9 @@ Return JSON only.
 Goal:
 - Check whether the drafted reply logically addresses the latest operator message.
 - Reject replies that ignore the operator's latest point, repeat the prior demand without progress, or weaken the case.
+- Reject replies whose first sentence does not directly answer the operator's latest claim.
+- Reject replies that accept an unreasonable burden shift back to the customer when the merchant should verify its own warehouse/return records.
+- Reject replies written in third person about the customer. The reply must be in first person singular.
 
 JSON schema:
 {
@@ -735,6 +744,15 @@ Before answering, silently proofread the message for grammar and clarity."""
         t = (text or "").lower()
         if any(x in t for x in ["still connected", "checking in to confirm whether we are still connected"]):
             return "keepalive"
+        if (
+            ("necessary for the original item to be returned" in t or "once we receive the original unit" in t)
+            and ("refund" in t or "process the refund" in t)
+        ):
+            return "return_required_claim"
+        if any(x in t for x in ["retrieve the order", "retrieve the original unit", "return it to lenovo", "return the original unit again"]):
+            return "customer_retrieve_and_rereturn"
+        if "sorry for any inconvenience" in t and any(x in t for x in ["best possible resolution", "surely check the details", "help you with"]):
+            return "soft_stall"
         if any(x in t for x in ["contact ups", "reach out to ups", "ups drop-off center", "ups for the order confirmation"]):
             return "ups_redirect"
         if "chat transcript" in t:
@@ -755,6 +773,12 @@ Before answering, silently proofread the message for grammar and clarity."""
         intent = self.infer_agent_intent(self.last_agent_msg)
         if intent == "keepalive":
             return "confirm connection and force a concrete next step"
+        if intent == "return_required_claim":
+            return "state that tracking proves the return was already delivered and force warehouse verification plus refund timeline"
+        if intent == "customer_retrieve_and_rereturn":
+            return "reject the demand to retrieve and re-return an already delivered package and require Lenovo to verify internally"
+        if intent == "soft_stall":
+            return "convert empathy without action into a concrete refund status update and written timeline"
         if intent == "ups_redirect":
             return "push Lenovo to coordinate internally with UPS and keep the case escalated"
         if intent == "empty_box_claim":
@@ -860,7 +884,7 @@ Before answering, silently proofread the message for grammar and clarity."""
             if (self.case_type or "").upper() in {"DOA", "DAMAGED", "DEFECTIVE", "BROKEN"}:
                 return (
                     f"I need help with order {order}. "
-                    "The laptop was delivered with a broken screen, Lenovo arranged a replacement, the replacement was not received and returned back to Lenovo, and the returned merchandise has already been delivered back. "
+                    "I received a laptop with a broken screen, Lenovo arranged a replacement, I never received that replacement, and I already returned the defective laptop using Lenovo's label. "
                     "Please confirm the full refund and the exact processing timeline today."
                 )
             return (
@@ -879,6 +903,21 @@ Before answering, silently proofread the message for grammar and clarity."""
             return (
                 "Thank you for confirming the escalation. "
                 "Please confirm the written resolution timeline for case ID C004094813 today and clarify whether Lenovo is treating this as an empty-box claim or a lost return."
+            )
+        if any(x in t for x in ["necessary for the original item to be returned", "once we receive the original unit"]):
+            return (
+                "The tracking already shows the original defective laptop was delivered back to Lenovo, so this should not still be treated as an unreceived return. "
+                "Please verify this with your warehouse and confirm the refund status plus the written refund timeline today."
+            )
+        if any(x in t for x in ["retrieve the order", "retrieve the original unit", "return it to lenovo"]):
+            return (
+                "I should not be asked to retrieve and re-return a package that tracking already shows was delivered to Lenovo. "
+                "Please verify the discrepancy internally with your warehouse and confirm in writing whether Lenovo has the return, along with the refund timeline today."
+            )
+        if "sorry for any inconvenience" in t and any(x in t for x in ["best possible resolution", "surely check the details", "help you with"]):
+            return (
+                "Thank you, but we need a concrete update rather than a general assurance. "
+                "Please confirm the refund status for the returned defective laptop and provide the written timeline for resolution today."
             )
         if any(x in t for x in ["contact ups", "reach out to ups", "contact the ups drop-off center", "ups for the order confirmation"]):
             return (
@@ -912,7 +951,7 @@ Before answering, silently proofread the message for grammar and clarity."""
             )
         if "name" in t:
             return (
-                f"The customer name is {normalize_customer_name(self.customer_name)}. "
+                f"My name is {normalize_customer_name(self.customer_name)}. "
                 "Please confirm the next step once you verify the account."
             )
         if any(x in t for x in ["case id", "ticket", "reference"]):
@@ -1063,7 +1102,27 @@ Before answering, silently proofread the message for grammar and clarity."""
         # Удаляем markdown шум.
         t = re.sub(r"^\*+|\*+$", "", t).strip()
         t = re.sub(r"\n{2,}", "\n", t).strip()
-        return t
+        return self._enforce_first_person(t)
+
+    def _enforce_first_person(self, text):
+        t = (text or "").strip()
+        if not t:
+            return ""
+        replacements = [
+            (r"\bthe customer name is\b", "My name is"),
+            (r"\bthe customer returned\b", "I returned"),
+            (r"\bthe customer has not\b", "I have not"),
+            (r"\bthe customer did not\b", "I did not"),
+            (r"\bthe customer needs\b", "I need"),
+            (r"\bthe customer is\b", "I am"),
+            (r"\bthe customer\b", "I"),
+            (r"\bthe buyer\b", "I"),
+            (r"\bthe account holder\b", "I"),
+        ]
+        for pattern, repl in replacements:
+            t = re.sub(pattern, repl, t, flags=re.I)
+        t = re.sub(r"\bI returned the defective laptop using Lenovo's label\b", "I returned the defective laptop using Lenovo's UPS label", t, flags=re.I)
+        return re.sub(r"\s+", " ", t).strip()
 
     def _normalize_message(self, text):
         return re.sub(r"\s+", " ", (text or "").strip().lower())
@@ -1073,8 +1132,16 @@ Before answering, silently proofread the message for grammar and clarity."""
         intent = self.infer_agent_intent(agent_text)
         if not msg:
             return False
+        if "the customer" in msg or "the buyer" in msg:
+            return False
         if intent == "keepalive":
             return "connected" in msg or msg.startswith("yes")
+        if intent == "return_required_claim":
+            return ("tracking" in msg or "delivered" in msg) and ("verify" in msg or "refund" in msg)
+        if intent == "customer_retrieve_and_rereturn":
+            return ("tracking" in msg or "delivered" in msg or "already" in msg) and ("verify" in msg or "warehouse" in msg or "discrepancy" in msg)
+        if intent == "soft_stall":
+            return "concrete" in msg or "timeline" in msg or "refund status" in msg
         if intent == "ups_redirect":
             return "ups" in msg and ("internally" in msg or "returns team" in msg or "escalat" in msg)
         if intent == "transcript_offer":
@@ -4106,9 +4173,12 @@ async def run_session(
 
             if session.message_count >= 4:
                 print("\n🏁 Достигнут финальный этап эскалации.")
-                cont = input("  Продолжить диалог? [y/N]: ").strip().lower()
-                if cont != "y":
-                    break
+                if force_auto_mode or (auto_send_noncritical and auto_send_critical):
+                    print("🤖 Авто-режим: продолжаю диалог без ручной паузы.")
+                else:
+                    cont = input("  Продолжить диалог? [y/N]: ").strip().lower()
+                    if cont != "y":
+                        break
 
         print("\n✅ Сессия завершена.")
         await browser.close()

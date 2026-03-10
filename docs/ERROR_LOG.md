@@ -83,3 +83,15 @@ Document every meaningful runtime failure and mitigation.
   - Added review-trace logging so future false positives can be audited from structured runtime data instead of only console output.
 - Status:
   - Fixed in code; ready for live revalidation on the next clean operator exchange.
+
+## 2026-03-10 — Third-Person Refund Replies And Auto-Mode Pause
+- Symptom:
+  - Live Lenovo replies sometimes spoke about the user as `the customer`, and the runtime could stall mid-chat on the manual prompt `Продолжить диалог? [y/N]:`.
+- Cause:
+  - Prompting and fallback logic still allowed third-person case phrasing in some negotiation branches, and the final-stage continuation guard still defaulted to interactive confirmation.
+- Mitigation:
+  - Hardened prompts, critic checks, and reply sanitization to enforce first-person singular wording.
+  - Added explicit handling for `return required before refund`, `retrieve and return again`, and soft-stall rhetoric so replies target the operator's actual claim.
+  - Disabled the manual continuation stop when full auto mode is active.
+- Status:
+  - Fixed in code; pending clean live-chat revalidation.

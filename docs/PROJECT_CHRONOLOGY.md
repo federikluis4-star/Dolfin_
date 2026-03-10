@@ -235,3 +235,15 @@ Use one entry per significant work block.
   - The bot now reaches Lenovo chat-ready state on the normal runtime path and can self-complete the advisor form without a manual live probe.
 - Issues/Notes:
   - Lenovo still mixes stale transcript text with the active prompt, so final operator-ready detection remains sensitive and should continue to be monitored.
+
+## 2026-03-10
+- Scope: First-person negotiation hardening for live Lenovo operator chats.
+- Actions:
+  - Rewrote the support-writing prompts so live chat replies are generated strictly as the account holder in first person, not in third person as `the customer`.
+  - Added explicit intent handling for operator burden-shift rhetoric such as `return required before refund`, `retrieve and return again`, and soft stalling language.
+  - Added reply sanitization and critic rejection for third-person wording and weak replies that fail to answer the operator's latest claim in the first sentence.
+  - Removed the forced manual pause after multiple bot messages when full auto mode is enabled, so live chats no longer stall on `Продолжить диалог?`.
+- Result:
+  - The bot is better aligned with live operator rhetoric and no longer relies on third-person case phrasing in negotiation replies.
+- Issues/Notes:
+  - These improvements need live revalidation on the next clean operator exchange because Lenovo chat state can still be interrupted by widget resets or disconnects.
