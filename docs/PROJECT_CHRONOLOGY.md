@@ -45,6 +45,22 @@ Use one entry per significant work block.
   - The remaining risk is no longer the advisor form itself; it is the quality of downstream dialogue logic for each case type.
 
 ## 2026-03-10
+- Scope: Live dialogue review and operator-message quality control.
+- Actions:
+  - Added a persistent review trace pipeline to log:
+    - operator message,
+    - inferred intent,
+    - draft reply,
+    - critic verdict,
+    - final sent message.
+  - Added filtering for transient typing indicators such as `Advisor is typing` so the bot does not answer to non-message noise.
+  - Kept the trace local in `logs/live_chat_review.jsonl` to support iterative tuning of reply quality without changing model weights.
+- Result:
+  - The bot can now be tuned from real operator transcripts with a concrete audit trail of why each answer was chosen and whether critic-pass changed it.
+- Issues/Notes:
+  - This improves supervision and correction quality; it does not replace the need for case-specific strategy rules when the merchant changes stance mid-dialogue.
+
+## 2026-03-10
 - Scope: Agent workflow policy hardening around sandbox approvals and live browser probes.
 - Actions:
   - Updated `AGENTS.md` to explicitly prefer normal `python3 bot.py` runs and code-side instrumentation over ad-hoc escalated CDP probes.

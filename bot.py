@@ -51,6 +51,7 @@ DEFAULT_CUSTOMER_EMAIL = os.getenv("DEFAULT_CUSTOMER_EMAIL", "")
 DEFAULT_CUSTOMER_NAME = os.getenv("DEFAULT_CUSTOMER_NAME", "")
 DEFAULT_CUSTOMER_PHONE = os.getenv("DEFAULT_CUSTOMER_PHONE", "")
 DEFAULT_ORDER_NUM = os.getenv("DEFAULT_ORDER_NUM", "")
+REVIEW_TRACE_PATH = os.getenv("REVIEW_TRACE_PATH", "logs/live_chat_review.jsonl")
 LENOVO_CHAT_URL = os.getenv(
     "LENOVO_CHAT_URL",
     "https://www.lenovo.com/us/vipmembers/ticketsatwork/en/contact/order-support/",
@@ -502,6 +503,8 @@ class CopilotSession:
         self.operator_claims = []
         self.contradictions = []
         self.lenovo_widget_reset_done = False
+        self.review_trace_path = REVIEW_TRACE_PATH
+        self.last_critic_verdict = {}
 
     def case_name(self):
         t = (self.case_type or "").upper()
@@ -599,6 +602,23 @@ Before answering, silently proofread the message for grammar and clarity."""
             "contradictions": self.contradictions[-6:],
         }
 
+    def _append_review_trace(self, event_type, payload):
+        try:
+            trace_path = Path(self.review_trace_path)
+            trace_path.parent.mkdir(parents=True, exist_ok=True)
+            record = {
+                "ts": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                "event": event_type,
+                "case_type": self.case_name(),
+                "order_num": self.order_num or "",
+                "dialogue_state": self.dialogue_state,
+                "payload": payload,
+            }
+            with trace_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, ensure_ascii=True) + "\n")
+        except Exception:
+            pass
+
     def record_agent_message(self, agent_text):
         agent_text = (agent_text or "").strip()
         if not agent_text:
@@ -606,6 +626,15 @@ Before answering, silently proofread the message for grammar and clarity."""
         self.last_agent_msg = agent_text
         self.transcript.append({"role": "agent", "content": agent_text})
         self._update_case_memory(agent_text, role="agent")
+        self._append_review_trace(
+            "agent_message",
+            {
+                "message": agent_text,
+                "agent_intent": self.infer_agent_intent(agent_text),
+                "current_objective": self.current_objective(),
+                "contradictions": self.contradictions[-4:],
+            },
+        )
 
     def should_send_message(self, message):
         normalized = self._normalize_message(message)
@@ -621,6 +650,15 @@ Before answering, silently proofread the message for grammar and clarity."""
     def mark_message_sent(self, message):
         self.last_sent_msg = (message or "").strip()
         self._update_case_memory(self.last_sent_msg, role="customer_rep")
+        self._append_review_trace(
+            "sent_message",
+            {
+                "message": self.last_sent_msg,
+                "agent_intent": self.infer_agent_intent(self.last_agent_msg),
+                "current_objective": self.current_objective(),
+                "unresolved_demands": self.unresolved_demands[-4:],
+            },
+        )
 
     def _append_unique(self, bucket, item, limit=12):
         item = (item or "").strip()
@@ -777,13 +815,36 @@ Before answering, silently proofread the message for grammar and clarity."""
         action = (plan.get("action") or "wait").strip().lower()
         if action not in {"send_message", "wait", "finish"}:
             action = "wait"
-        message = self._sanitize_reply(plan.get("message") or "") if action == "send_message" else ""
+        raw_message = self._sanitize_reply(plan.get("message") or "") if action == "send_message" else ""
+        message = raw_message
+        precheck_reason = ""
         if action == "send_message" and self._looks_like_role_inversion(message):
+            precheck_reason = "role_inversion"
             message = self._fallback_message(agent_text=agent_text, first_turn=first_turn)
         if action == "send_message" and not self._message_addresses_intent(message, agent_text):
+            precheck_reason = precheck_reason or "intent_mismatch"
             message = self._fallback_message(agent_text=agent_text, first_turn=first_turn)
+        message_before_critic = message
         if action == "send_message":
             message = self._critic_pass(agent_text, message, observation, first_turn)
+        self._append_review_trace(
+            "reply_plan",
+            {
+                "first_turn": bool(first_turn),
+                "agent_message": agent_text or "",
+                "agent_intent": self.infer_agent_intent(agent_text),
+                "observation": observation,
+                "action": action,
+                "goal": (plan.get("goal") or "").strip(),
+                "reason": (plan.get("reason") or "").strip(),
+                "confidence": float(plan.get("confidence") or 0.0),
+                "draft_initial": raw_message,
+                "draft_after_rules": message_before_critic,
+                "precheck_reason": precheck_reason,
+                "critic": self.last_critic_verdict,
+                "final_message": message,
+            },
+        )
         return {
             "action": action,
             "message": message,
@@ -889,12 +950,31 @@ Before answering, silently proofread the message for grammar and clarity."""
 
     def _critic_pass(self, agent_text, draft, observation=None, first_turn=False):
         draft = (draft or "").strip()
+        self.last_critic_verdict = {
+            "approved": True,
+            "source": "draft",
+            "final_message": draft,
+        }
         if not draft:
             return draft
         if self._looks_like_role_inversion(draft):
-            return self._fallback_message(agent_text=agent_text, first_turn=first_turn)
+            fix = self._fallback_message(agent_text=agent_text, first_turn=first_turn)
+            self.last_critic_verdict = {
+                "approved": False,
+                "source": "precheck_role_inversion",
+                "fix": fix,
+                "final_message": fix,
+            }
+            return fix
         if not self._message_addresses_intent(draft, agent_text):
-            return self._fallback_message(agent_text=agent_text, first_turn=first_turn)
+            fix = self._fallback_message(agent_text=agent_text, first_turn=first_turn)
+            self.last_critic_verdict = {
+                "approved": False,
+                "source": "precheck_intent_mismatch",
+                "fix": fix,
+                "final_message": fix,
+            }
+            return fix
         try:
             critic_input = {
                 "case": self.build_case_snapshot(),
@@ -911,12 +991,25 @@ Before answering, silently proofread the message for grammar and clarity."""
             verdict = self._extract_json_object(raw) or {}
             approved = bool(verdict.get("approved"))
             fix = self._sanitize_reply(verdict.get("fix") or "")
+            self.last_critic_verdict = {
+                "approved": approved,
+                "source": "llm_critic",
+                "fix": fix,
+                "raw_verdict": verdict,
+                "final_message": draft,
+            }
             if approved:
                 return draft
             if fix and not self._looks_like_role_inversion(fix) and self._message_addresses_intent(fix, agent_text):
+                self.last_critic_verdict["final_message"] = fix
                 return fix
-        except Exception:
-            pass
+        except Exception as e:
+            self.last_critic_verdict = {
+                "approved": True,
+                "source": "critic_error",
+                "error": str(e),
+                "final_message": draft,
+            }
         return draft
 
     def _call_llm(self, system_prompt=None, history=None, temperature=None, sanitize=True):
@@ -1093,6 +1186,8 @@ async def read_last_agent_message(page, store):
                 "general question",
                 "operator",
                 "consumer",
+                "advisor is typing",
+                "agent is typing",
                 "start a new chat",
                 "type your message here",
                 "ai chatbot by powerfronttm",
@@ -1122,6 +1217,7 @@ async def read_last_agent_message(page, store):
                 "one moment",
                 "transfer",
                 "connecting",
+                "is typing",
                 "please wait",
                 "queue",
                 "ai chatbot by powerfront",

@@ -72,3 +72,14 @@ Document every meaningful runtime failure and mitigation.
   - Hardened widget-open handling so empty shells re-trigger the Lenovo CTA instead of looping.
 - Status:
   - Fixed and validated on the normal full runtime. Mixed stale transcript text near the final prompt should still be monitored as a secondary risk, but the original form-stall defect is closed.
+
+## 2026-03-10 — Typing Indicator Misread As Operator Message
+- Symptom:
+  - Live dialogue loop treated `Advisor is typing` as a real operator reply and drafted an unnecessary answer.
+- Cause:
+  - Transcript reader filtered many Lenovo/Powerfront system fragments, but did not explicitly block typing-status text.
+- Mitigation:
+  - Added `Advisor is typing` / `agent is typing` / `is typing` filtering in the operator-message reader.
+  - Added review-trace logging so future false positives can be audited from structured runtime data instead of only console output.
+- Status:
+  - Fixed in code; ready for live revalidation on the next clean operator exchange.
