@@ -71,4 +71,4 @@ Document every meaningful runtime failure and mitigation.
   - Added immediate execution of visible Lenovo states when the widget is already open.
   - Hardened widget-open handling so empty shells re-trigger the Lenovo CTA instead of looping.
 - Status:
-  - Mitigated. Full runtime now reaches chat-ready and sends the first message, but mixed stale transcript text near the final prompt should still be monitored.
+  - Fixed and validated on the normal full runtime. Mixed stale transcript text near the final prompt should still be monitored as a secondary risk, but the original form-stall defect is closed.

@@ -23,7 +23,26 @@ Use one entry per significant work block.
 - Result:
   - Live validation on profile `Katrin_NJ` reached the final prompt `Diana Bardian, how can we help you today?`, sent `Hello`, and received `One moment please while I transfer you to an Operator.`
 - Issues/Notes:
-  - The full `python3 bot.py` outer loop should still be revalidated from a fresh clean chat because the live fix path during this block used targeted runtime probing in addition to the code changes.
+  - This block established the live-probe path first; later the full normal runtime was separately validated end-to-end and documented below.
+
+## 2026-03-10
+- Scope: Lenovo full runtime success milestone.
+- Actions:
+  - Re-ran the normal `python3 bot.py` path on profile `Katrin_NJ` after switching Lenovo advisor filling from brittle selectors to live `input/textarea` scanning by `aria-label`, `id`, and `type`.
+  - Confirmed the runtime itself, without a manual live-input intervention, completed:
+    - `Existing Orders`
+    - `General question`
+    - `Operator`
+    - `Consumer`
+    - `name`
+    - `email`
+    - `phone`
+    - `order`
+    - first outgoing chat message
+- Result:
+  - Success fixed and confirmed: the bot now reaches Lenovo chat-ready state and opens the live chat on the normal runtime path by itself.
+- Issues/Notes:
+  - The remaining risk is no longer the advisor form itself; it is the quality of downstream dialogue logic for each case type.
 
 ## 2026-03-10
 - Scope: Agent workflow policy hardening around sandbox approvals and live browser probes.
