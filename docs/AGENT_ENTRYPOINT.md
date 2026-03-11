@@ -84,7 +84,13 @@ From committed history and current working tree:
   - `unresolved_demands`
   - `contradictions`
   - `dialogue_state`
+- The bot now also persists case memory across runs in `logs/case_memory/`, including:
+  - `latest_case_id`
+  - `latest_case_outcome`
+  - `follow_up_deadline`
+  - transcript tail and negotiation buckets
 - The bot classifies operator intent for Lenovo chats and uses a critic pass before sending a reply.
+- The runtime can sync the last customer message from the live transcript, so manual user replies can be folded back into the bot's working memory.
 
 ## Current Working Tree Status
 Do not assume this section is always current. Verify with `git status --short` before touching code.

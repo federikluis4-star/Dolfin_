@@ -81,6 +81,11 @@ python bot.py
   - `unresolved_demands`
   - `contradictions`
   - `dialogue_state`
+- Сохраняет persistent memory кейса между запусками в `logs/case_memory/`:
+  - `latest_case_id`
+  - `latest_case_outcome`
+  - `follow_up_deadline`
+  - transcript tail для возобновления спора позже
 - Различает типы хода оператора:
   - `keepalive`
   - `UPS redirect`
@@ -94,6 +99,7 @@ python bot.py
   - не дублирует ли прошлый ход,
   - не звучит ли бот как сам продавец.
 - Отвечает не мгновенно, а с короткой human-like задержкой.
+- Подхватывает последнюю нашу реплику из transcript, даже если сообщение в чат отправили вручную, а не бот.
 
 ---
 

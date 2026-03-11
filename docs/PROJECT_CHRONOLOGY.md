@@ -247,3 +247,24 @@ Use one entry per significant work block.
   - The bot is better aligned with live operator rhetoric and no longer relies on third-person case phrasing in negotiation replies.
 - Issues/Notes:
   - These improvements need live revalidation on the next clean operator exchange because Lenovo chat state can still be interrupted by widget resets or disconnects.
+
+## 2026-03-11
+- Scope: Lenovo live-chat attach reliability and persisted case outcomes.
+- Actions:
+  - Fixed the Lenovo live-send path to prefer the real operator textarea (`#chatInput`) and send button (`#chatSendButton`) instead of stale workflow inputs from the advisor form.
+  - Relaxed the live-chat readiness guard so a visible Lenovo operator textarea plus final prompt is treated as a valid live chat even when stale transcript text still says `order`.
+  - Added persistent case memory snapshots under `logs/case_memory/`, including:
+    - `latest_case_id`
+    - `latest_case_outcome`
+    - `follow_up_deadline`
+    - transcript tail
+    - negotiation memory buckets
+  - Added transcript-sync support for the last customer message so manual user interventions can be picked up by the bot on later turns.
+  - Seeded the current Lenovo case `4649951015` with the live outcome:
+    - case ID `C003879117`
+    - escalation on the missing replacement
+    - requested wait window of `48 hours`
+- Result:
+  - The bot can now resume a paused Lenovo case with preserved outcome context instead of starting from a blank negotiation state.
+- Issues/Notes:
+  - The live attach loop should be revalidated on the next clean operator exchange to confirm the new Lenovo `#chatInput` priority fully resolves `TYPED False`.

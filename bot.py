@@ -20,6 +20,13 @@ from datetime import datetime
 from playwright.async_api import async_playwright
 
 # ─── НАСТРОЙКИ ───────────────────────────────────────────────────────────────
+PROJECT_ROOT = Path(__file__).resolve().parent
+
+def resolve_project_path(raw_path):
+    path = Path(raw_path)
+    if path.is_absolute():
+        return path
+    return PROJECT_ROOT / path
 
 def load_env_file(env_path=".env"):
     """Простая загрузка KEY=VALUE из .env без внешних зависимостей."""
@@ -51,7 +58,8 @@ DEFAULT_CUSTOMER_EMAIL = os.getenv("DEFAULT_CUSTOMER_EMAIL", "")
 DEFAULT_CUSTOMER_NAME = os.getenv("DEFAULT_CUSTOMER_NAME", "")
 DEFAULT_CUSTOMER_PHONE = os.getenv("DEFAULT_CUSTOMER_PHONE", "")
 DEFAULT_ORDER_NUM = os.getenv("DEFAULT_ORDER_NUM", "")
-REVIEW_TRACE_PATH = os.getenv("REVIEW_TRACE_PATH", "logs/live_chat_review.jsonl")
+REVIEW_TRACE_PATH = str(resolve_project_path(os.getenv("REVIEW_TRACE_PATH", "logs/live_chat_review.jsonl")))
+CASE_MEMORY_DIR = str(resolve_project_path(os.getenv("CASE_MEMORY_DIR", "logs/case_memory")))
 LENOVO_CHAT_URL = os.getenv(
     "LENOVO_CHAT_URL",
     "https://www.lenovo.com/us/vipmembers/ticketsatwork/en/contact/order-support/",
@@ -513,7 +521,14 @@ class CopilotSession:
         self.contradictions = []
         self.lenovo_widget_reset_done = False
         self.review_trace_path = REVIEW_TRACE_PATH
+        self.case_memory_dir = CASE_MEMORY_DIR
+        self.case_memory_path = self._build_case_memory_path()
         self.last_critic_verdict = {}
+        self.latest_case_id = ""
+        self.latest_case_outcome = ""
+        self.follow_up_deadline = ""
+        self.last_saved_at = ""
+        self._load_case_memory()
 
     def case_name(self):
         t = (self.case_type or "").upper()
@@ -609,7 +624,84 @@ Before answering, silently proofread the message for grammar and clarity."""
             "confirmed_facts": self.confirmed_facts[-8:],
             "operator_claims": self.operator_claims[-8:],
             "contradictions": self.contradictions[-6:],
+            "latest_case_id": self.latest_case_id,
+            "latest_case_outcome": self.latest_case_outcome,
+            "follow_up_deadline": self.follow_up_deadline,
         }
+
+    def _case_memory_key(self):
+        store_key = re.sub(r"[^a-z0-9]+", "-", (self.store or "unknown").lower()).strip("-") or "unknown"
+        order_key = re.sub(r"[^a-z0-9]+", "", (self.order_num or "").lower()) or "noorder"
+        return f"{store_key}_{order_key}"
+
+    def _build_case_memory_path(self):
+        return str(Path(self.case_memory_dir) / f"{self._case_memory_key()}.json")
+
+    def _load_case_memory(self):
+        try:
+            path = Path(self.case_memory_path)
+            if not path.exists():
+                return
+            data = json.loads(path.read_text(encoding="utf-8"))
+            self.last_agent_msg = data.get("last_agent_message", self.last_agent_msg)
+            self.last_sent_msg = data.get("last_customer_message", self.last_sent_msg)
+            self.dialogue_state = data.get("dialogue_state", self.dialogue_state)
+            self.unresolved_demands = list(data.get("unresolved_demands", self.unresolved_demands))[-12:]
+            self.confirmed_facts = list(data.get("confirmed_facts", self.confirmed_facts))[-12:]
+            self.operator_claims = list(data.get("operator_claims", self.operator_claims))[-12:]
+            self.contradictions = list(data.get("contradictions", self.contradictions))[-12:]
+            self.latest_case_id = data.get("latest_case_id", self.latest_case_id)
+            self.latest_case_outcome = data.get("latest_case_outcome", self.latest_case_outcome)
+            self.follow_up_deadline = data.get("follow_up_deadline", self.follow_up_deadline)
+            self.transcript = list(data.get("transcript_tail", self.transcript))[-24:]
+            self.last_saved_at = data.get("updated_at", self.last_saved_at)
+        except Exception:
+            pass
+
+    def _persist_case_memory(self):
+        try:
+            path = Path(self.case_memory_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "updated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                "store": self.store,
+                "case_type": self.case_name(),
+                "order_num": self.order_num or "",
+                "customer_name": self.customer_name or "",
+                "customer_email": self.customer_email or "",
+                "customer_phone": self.customer_phone or "",
+                "last_agent_message": self.last_agent_msg or "",
+                "last_customer_message": self.last_sent_msg or "",
+                "dialogue_state": self.dialogue_state,
+                "unresolved_demands": self.unresolved_demands[-12:],
+                "confirmed_facts": self.confirmed_facts[-12:],
+                "operator_claims": self.operator_claims[-12:],
+                "contradictions": self.contradictions[-12:],
+                "latest_case_id": self.latest_case_id,
+                "latest_case_outcome": self.latest_case_outcome,
+                "follow_up_deadline": self.follow_up_deadline,
+                "transcript_tail": self.transcript[-24:],
+            }
+            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            self.last_saved_at = payload["updated_at"]
+        except Exception:
+            pass
+
+    def record_customer_message(self, message, source="manual"):
+        message = (message or "").strip()
+        if not message:
+            return
+        self.last_sent_msg = message
+        self.transcript.append({"role": "customer_rep", "content": message})
+        self._update_case_memory(message, role="customer_rep")
+        self._append_review_trace(
+            "customer_message_sync",
+            {
+                "message": message,
+                "source": source,
+                "current_objective": self.current_objective(),
+            },
+        )
 
     def _append_review_trace(self, event_type, payload):
         try:
@@ -644,6 +736,7 @@ Before answering, silently proofread the message for grammar and clarity."""
                 "contradictions": self.contradictions[-4:],
             },
         )
+        self._persist_case_memory()
 
     def should_send_message(self, message):
         normalized = self._normalize_message(message)
@@ -668,6 +761,7 @@ Before answering, silently proofread the message for grammar and clarity."""
                 "unresolved_demands": self.unresolved_demands[-4:],
             },
         )
+        self._persist_case_memory()
 
     def _append_unique(self, bucket, item, limit=12):
         item = (item or "").strip()
@@ -688,16 +782,32 @@ Before answering, silently proofread the message for grammar and clarity."""
             return
         if role == "agent":
             self._append_unique(self.operator_claims, t)
+            ids = re.findall(r"\bC\d{6,12}\b", t, flags=re.I)
+            if ids:
+                self.latest_case_id = ids[-1].upper()
+                self._append_unique(self.confirmed_facts, f"Case ID {self.latest_case_id} was provided by Lenovo")
             if any(x in lowered for x in ["empty box", "box was empty"]):
                 self._append_unique(self.operator_claims, "Lenovo claims the returned box was empty")
             if any(x in lowered for x in ["warehouse has not received", "not received the returned item", "not received the return"]):
                 self._append_unique(self.operator_claims, "Lenovo claims the warehouse did not receive the return")
-            if any(x in lowered for x in ["case id", "c004094813"]):
-                self._append_unique(self.confirmed_facts, "Case ID C004094813 was referenced by Lenovo")
             if any(x in lowered for x in ["will be escalated", "escalated to the returns team"]):
                 self._append_unique(self.confirmed_facts, "Lenovo said the case would be escalated to the returns team")
+                self.latest_case_outcome = "Lenovo said the issue was escalated for further review."
+            if any(x in lowered for x in ["i will need to escalate this issue", "i need to escalate this issue", "consider it as lost"]):
+                self._append_unique(self.confirmed_facts, "Lenovo said the replacement issue would be escalated as a lost shipment")
+                self.latest_case_outcome = "Lenovo said the replacement would be escalated as a lost shipment."
+            if "48 hours" in lowered:
+                self.follow_up_deadline = "48 hours"
+                self.latest_case_outcome = (
+                    f"Lenovo opened case {self.latest_case_id} and asked for 48 hours to review the issue."
+                    if self.latest_case_id else
+                    "Lenovo asked for 48 hours to review the issue."
+                )
             if any(x in lowered for x in ["5-7 business days", "processed within"]):
                 self._append_unique(self.confirmed_facts, "Lenovo stated the refund would process within 5-7 business days after receiving the return")
+                self.latest_case_outcome = "Lenovo said refunds are typically processed within 5-7 business days after receipt."
+            if any(x in lowered for x in ["thank you for confirming", "thank you for staying connected", "sure, diana", "thank you, diana"]):
+                self._append_unique(self.confirmed_facts, "Lenovo acknowledged the case is still under review")
         else:
             if any(x in lowered for x in ["written basis", "policy basis"]):
                 self._append_unique(self.unresolved_demands, "written basis for withholding the refund")
@@ -725,9 +835,12 @@ Before answering, silently proofread the message for grammar and clarity."""
             )
 
         self.dialogue_state = self._infer_dialogue_state()
+        self._persist_case_memory()
 
     def _infer_dialogue_state(self):
         intent = self.infer_agent_intent(self.last_agent_msg)
+        if self.follow_up_deadline == "48 hours" and self.latest_case_id:
+            return "case_opened_waiting"
         if self.message_count <= 1:
             return "opening"
         if intent == "keepalive":
@@ -791,6 +904,8 @@ Before answering, silently proofread the message for grammar and clarity."""
             return "obtain written resolution timeline and exact dispute classification"
         if intent == "transcript_offer":
             return "accept the transcript only if escalation and timeline are also confirmed"
+        if self.dialogue_state == "case_opened_waiting":
+            return "preserve the case record and resume after the promised 48-hour review window if Lenovo does not resolve it"
         return "push toward refund, escalation, written basis, and timeline"
 
     def plan_next_action(self, agent_text="", observation=None, first_turn=False):
@@ -1395,14 +1510,66 @@ async def read_last_agent_message(page, store):
     except:
         return None
 
+async def read_last_customer_message(page, store):
+    sel = CHAT_SELECTORS.get(store, CHAT_SELECTORS["default"])
+    try:
+        def looks_like_noise(text):
+            t = re.sub(r"\s+", " ", (text or "").strip().lower())
+            if not t or len(t) < 2:
+                return True
+            blocked = [
+                "type your message here",
+                "advisor is typing",
+                "agent is typing",
+                "chat with us",
+                "existing orders",
+                "general question",
+                "operator",
+                "consumer",
+            ]
+            return any(x == t for x in blocked)
+
+        frames = [page.main_frame] + list(page.frames)
+        for frame in frames:
+            try:
+                all_elements = await frame.query_selector_all(sel["messages"])
+            except Exception:
+                continue
+            for el in reversed(all_elements):
+                try:
+                    text = (await el.inner_text()).strip()
+                    if looks_like_noise(text):
+                        continue
+                    cls = (await el.get_attribute("class") or "").lower()
+                    is_ours = any(w in cls for w in ["visitor", "customer", "user", "outgoing", "sent"])
+                    if is_ours:
+                        return text
+                except Exception:
+                    continue
+        return None
+    except Exception:
+        return None
+
 async def type_message(page, store, text):
     sel = CHAT_SELECTORS.get(store, CHAT_SELECTORS["default"])
     try:
         if store == "lenovo.com":
             try:
+                visible_state = await detect_lenovo_visible_state(page)
                 widget_text = (await get_lenovo_widget_text(page)).lower()
-                widget_state = classify_lenovo_widget_state(widget_text)
-                if widget_state in {"name", "email", "phone", "order", "existing_pick", "general_pick", "operator_pick", "consumer_pick"}:
+                widget_state = visible_state or classify_lenovo_widget_state(widget_text)
+                has_live_chat_input = False
+                for frame in [page.main_frame] + list(page.frames):
+                    try:
+                        live_input = await frame.query_selector(
+                            "textarea#chatInput:visible, textarea[placeholder='Type your message here']:visible, .cx-input textarea:visible"
+                        )
+                        if live_input:
+                            has_live_chat_input = True
+                            break
+                    except Exception:
+                        continue
+                if widget_state in {"name", "email", "phone", "order", "existing_pick", "general_pick", "operator_pick", "consumer_pick"} and not has_live_chat_input:
                     return False
             except Exception:
                 pass
@@ -1419,13 +1586,14 @@ async def type_message(page, store, text):
                             return r.width > 8 && r.height > 8 && st.visibility !== "hidden" && st.display !== "none";
                           };
                           const candidates = [
+                            document.querySelector("#chatInput"),
+                            document.querySelector("textarea[placeholder='Type your message here']"),
+                            document.querySelector(".cx-input textarea"),
                             ...Array.from(document.querySelectorAll("#insideWorkflowFieldCell input[aria-label], #insideWorkflowFieldCell textarea[aria-label]"))
                               .filter((el) => {
                                 const aria = (el.getAttribute("aria-label") || "").toLowerCase();
                                 return visible(el) && aria.includes("how can we help you today") && !/\\(\\d+ of \\d+\\)/.test(aria);
                               }),
-                            document.querySelector("#chatInput"),
-                            document.querySelector("textarea[aria-label='Type your message here']"),
                           ].filter(Boolean);
                           const ta = candidates[0];
                           if (!ta) return false;
@@ -1563,6 +1731,38 @@ async def send_message(page, store):
     try:
         frames = [page.main_frame] + list(page.frames)
         if store == "lenovo.com":
+            for frame in frames:
+                try:
+                    sent = await frame.evaluate(
+                        """
+                        () => {
+                          const input = document.querySelector("#chatInput, textarea[placeholder='Type your message here'], .cx-input textarea");
+                          if (!input) return false;
+                          const value = (input.value || input.textContent || "").trim();
+                          if (!value) return false;
+                          const btn = document.querySelector("#chatSendButton, button.cx-send, [class*='cx-send'], [aria-label*='Send' i], button[type='submit']");
+                          if (btn) {
+                            const sig = ((btn.className || "") + " " + (btn.getAttribute("aria-label") || "")).toLowerCase();
+                            if (!sig.includes("disabled")) {
+                              btn.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+                              btn.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
+                              btn.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+                              if (typeof btn.click === "function") btn.click();
+                              return true;
+                            }
+                          }
+                          input.focus();
+                          ["keydown", "keypress", "keyup"].forEach((type) => {
+                            input.dispatchEvent(new KeyboardEvent(type, { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true }));
+                          });
+                          return true;
+                        }
+                        """
+                    )
+                    if sent:
+                        return True
+                except Exception:
+                    continue
             for frame in frames:
                 try:
                     sent = await frame.evaluate(
@@ -3657,7 +3857,35 @@ async def is_operator_chat_open(page, store):
         widget_state = await detect_lenovo_visible_state(page) or classify_lenovo_widget_state(widget_text)
         if widget_state == "chat_ready":
             return True
+        # Lenovo иногда держит stale transcript text (`order`) после полного handoff.
+        # Если live chat input уже виден вместе с финальным prompt/input, считаем чат готовым.
+        for frame in frames:
+            try:
+                live_input = await frame.query_selector(
+                    "textarea#chatInput:visible, textarea[placeholder='Type your message here']:visible, .cx-input textarea:visible"
+                )
+                final_prompt = await frame.query_selector(
+                    "input[aria-label*='how can we help you today' i]:visible, textarea[aria-label*='how can we help you today' i]:visible"
+                )
+                if live_input and final_prompt:
+                    return True
+            except Exception:
+                continue
         if widget_state in {"agent_entry", "existing_pick", "general_pick", "operator_pick", "consumer_pick", "name", "email", "phone", "order", "restart"}:
+            for frame in frames:
+                try:
+                    live_input = await frame.query_selector(
+                        "textarea#chatInput:visible, textarea[placeholder='Type your message here']:visible, .cx-input textarea:visible"
+                    )
+                    if not live_input:
+                        continue
+                    final_prompt = await frame.query_selector(
+                        "input[aria-label*='how can we help you today' i]:visible, textarea[aria-label*='how can we help you today' i]:visible"
+                    )
+                    if final_prompt:
+                        return True
+                except Exception:
+                    continue
             return False
         for frame in frames:
             try:
@@ -4083,6 +4311,9 @@ async def run_session(
                                 break
 
                     if ticks % 5 == 0:
+                        synced_customer = await read_last_customer_message(page, store)
+                        if synced_customer and synced_customer != session.last_sent_msg:
+                            session.record_customer_message(synced_customer, source="transcript_sync")
                         detected = await read_last_agent_message(page, store)
                         if detected and detected != session.last_agent_msg:
                             agent_msg = detected
@@ -4097,6 +4328,9 @@ async def run_session(
                 continue
 
             print("\n⚖️  Генерирую ответ...")
+            synced_customer = await read_last_customer_message(page, store)
+            if synced_customer and synced_customer != session.last_sent_msg:
+                session.record_customer_message(synced_customer, source="transcript_sync")
             observation = await collect_chat_observation(page, store, session)
             plan = session.plan_next_action(
                 agent_text=agent_msg,

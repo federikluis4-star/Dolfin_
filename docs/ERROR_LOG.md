@@ -95,3 +95,15 @@ Document every meaningful runtime failure and mitigation.
   - Disabled the manual continuation stop when full auto mode is active.
 - Status:
   - Fixed in code; pending clean live-chat revalidation.
+
+## 2026-03-11 — Lenovo Live Chat Readable But Not Sendable (`TYPED False`)
+- Symptom:
+  - In attach/live mode the bot could read and reason about new operator replies, but `type_message()` returned `False` and no reply was inserted into the already-open Lenovo chat.
+- Cause:
+  - Lenovo kept stale advisor-form state in the transcript, so the runtime still prioritized workflow inputs and a too-strict chat-open guard instead of the real live operator textarea `#chatInput`.
+- Mitigation:
+  - Updated Lenovo live-send logic to prioritize `#chatInput` and `#chatSendButton`.
+  - Relaxed live-chat readiness checks so visible `#chatInput` plus the final prompt are accepted as a live operator chat even if stale transcript text still says `order`.
+  - Added persistent case memory and customer transcript sync so attach-mode can resume with the latest known case state and manual user messages.
+- Status:
+  - Fixed in code; pending clean live revalidation on the next operator exchange.
