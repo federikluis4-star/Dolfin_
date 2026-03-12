@@ -107,3 +107,35 @@ Document every meaningful runtime failure and mitigation.
   - Added persistent case memory and customer transcript sync so attach-mode can resume with the latest known case state and manual user messages.
 - Status:
   - Fixed in code; pending clean live revalidation on the next operator exchange.
+
+## 2026-03-11 — Scripted Tone And Wrong Case IDs In Operator Replies
+- Symptom:
+  - Some replies still sounded like a scripted case manager instead of a live customer, using phrases such as `I am assisting with a case`, generic filler openings, or overly broad case restatements.
+  - Fallback replies could also reuse a hardcoded legacy case ID in unrelated chats.
+- Cause:
+  - Prompting and sanitization enforced first-person wording, but did not yet strip meta phrasing, filler openers, duplicated sentences, or wrong case-ID reuse.
+  - Intent handling also treated some chat-closure warnings and data-request turns too generically.
+- Mitigation:
+  - Tightened the generation and critic prompts around direct live-chat tone.
+  - Added reply polishing to normalize case IDs, remove scripted/meta phrasing, and trim filler before sending.
+  - Added explicit intent handling for chat-closure warnings and direct field requests so replies answer the latest operator point first.
+- Status:
+  - Fixed in code; locally spot-checked and pending clean live-chat revalidation.
+
+## 2026-03-11 — Stale Case Memory And Over-Broad Field Detection Caused Templated Repeats
+- Symptom:
+  - Reopened Lenovo chats could lose the active `CR...` case ID, escalation owner, and other already-resolved facts even though they were present in the saved transcript.
+  - The bot then kept re-asking for case ID, owner, or policy text and looked more like a template than a human.
+  - Operator messages that merely mentioned internal email workflows could incorrectly trigger replies like `The email on the order is ...`.
+  - Housekeeping turns such as hold requests or polite closings could still fall back to a generic DOA/RNR pressure bundle instead of a short human reply.
+- Cause:
+  - Session startup trusted stale `case_memory` snapshots more than the full transcript, and the escalation-owner heuristic was accidentally neutralized by unrelated `same resolution` wording later in the chat.
+  - Field-request detection treated some generic `email` mentions too broadly.
+  - A few narrow operator intents were still routed through generic fallback logic.
+- Mitigation:
+  - Rebuilt derived case state from the full saved transcript on load and persisted the repaired memory back to disk.
+  - Fixed escalation-owner detection and shifted `next_best_asks()` toward the missing approval step and approval deadline once case ID/owner/policy were already known.
+  - Added deterministic short replies for service-turn intents and moved polite-closing handling ahead of generic case fallbacks.
+  - Tightened explicit field-request matching so only real customer-data requests trigger account-detail replies.
+- Status:
+  - Fixed in code; syntax-checked and replayed locally against Lenovo case `4650132646`.

@@ -10,7 +10,6 @@ Use one entry per significant work block.
 - Issues/Notes
 
 ---
-
 ## 2026-03-10
 - Scope: Lenovo widget recovery and pre-chat workflow stabilization to first operator handoff.
 - Actions:
@@ -268,3 +267,51 @@ Use one entry per significant work block.
   - The bot can now resume a paused Lenovo case with preserved outcome context instead of starting from a blank negotiation state.
 - Issues/Notes:
   - The live attach loop should be revalidated on the next clean operator exchange to confirm the new Lenovo `#chatInput` priority fully resolves `TYPED False`.
+
+## 2026-03-11
+- Scope: Dialogue-quality hardening for live operator chats.
+- Actions:
+  - Tightened the reply prompts and critic rules so the bot now targets a live-customer tone instead of scripted case-manager phrasing such as `I am assisting with a case`.
+  - Added reply polishing to strip meta openings, generic filler, duplicated sentences, and wrong/hardcoded case IDs before a message is sent.
+  - Added explicit handling for operator chat-closure warnings and direct customer-data requests so replies answer the exact point first.
+  - Replaced the fallback layer's hardcoded legacy case ID with the active persisted case ID from the current session.
+- Result:
+  - The bot now generates shorter, more natural operator-facing replies and is less likely to sound templated or reference the wrong case.
+- Issues/Notes:
+  - These communication changes are syntactically verified and spot-checked locally, but still need clean live-chat revalidation against a real operator transcript.
+
+## 2026-03-11
+- Scope: Legally grounded escalation strategy for refund and non-delivery chats.
+- Actions:
+  - Added a structured `legal_context` to the case snapshot so the reply planner gets fact-dependent legal anchors, forbidden overclaims, and preferred escalation asks.
+  - Tightened the prompts and critic so the bot can use short, grounded legal pressure around prompt refunds, written policy basis, and conditional billing-dispute preservation without bluffing.
+  - Upgraded fallback replies to push harder on written basis, escalation owner, refund deadlines, and conditional card-dispute rights when the operator stalls or denies without basis.
+  - Expanded `critical` detection for stronger legal phrases such as `billing dispute`, `Regulation Z`, and `card issuer`.
+- Result:
+  - The bot can now press operators with more legally informed language while staying closer to fact-based FTC/CFPB-style consumer-rights framing instead of generic threats.
+- Issues/Notes:
+  - This work was validated with syntax checks and local spot checks; a clean live-chat run is still needed to tune how often the new legal-pressure layer should appear automatically.
+
+## 2026-03-11
+- Scope: Automatic post-chat conversation audit.
+- Actions:
+  - Added a dedicated post-chat audit prompt and transcript heuristics to score human-likeness, template risk, persuasion quality, and legal grounding after a session ends.
+  - Added per-case markdown reports under `logs/post_chat_audits/` so completed chats can be reviewed without parsing raw `jsonl` traces manually.
+  - Hooked the audit into normal session shutdown and manual quit paths so the report is generated automatically after the dialogue ends.
+- Result:
+  - Each completed or manually stopped case can now produce a readable post-chat analysis showing whether the bot sounded human or templated and what to tune next.
+- Issues/Notes:
+  - The audit depends on the configured LLM for the best analysis quality, but it also falls back to local heuristics if the model call fails.
+
+## 2026-03-11
+- Scope: Dialogue intelligence repair after Lenovo transcript audit.
+- Actions:
+  - Rebuilt derived case memory from the full saved transcript on session load, so reopened chats no longer depend on stale `case_memory` snapshots for `latest_case_id`, escalation-owner facts, deadlines, or contradictions.
+  - Fixed the case-state heuristics so an escalation owner like `NA CSAT Case Manager` is retained even if a different operator later says a supervisor would provide the same resolution.
+  - Narrowed `next_best_asks()` after partial operator answers: once case ID, owner, or policy text are already known, the bot now shifts to the missing approval step and approval deadline instead of repeating the whole escalation bundle.
+  - Added more deterministic short replies for service-turn intents such as retail/small-business classification, hold requests, callback loops, policy-text responses, and polite chat closings.
+  - Tightened explicit field-request detection so internal mentions of `email` no longer trigger incorrect replies like `The email on the order is ...`.
+- Result:
+  - The Lenovo case `4650132646` now reloads with `CR000085559`, the correct escalation-owner context, and more human-looking short replies on operator housekeeping turns.
+- Issues/Notes:
+  - These logic fixes were syntax-checked and replayed locally against the saved Lenovo transcript, but still need the next live operator run to measure whether template risk drops materially in production chats.
