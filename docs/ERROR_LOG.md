@@ -236,3 +236,25 @@ Document every meaningful runtime failure and mitigation.
   - The new reply path now demands issue classification, keeps the UPS review internal to Lenovo, and asks for the responsible team plus refund-decision deadline.
 - Status:
   - Fixed in code; verified locally against the Lenovo `1,405 miles away` message pattern.
+
+## 2026-03-14 — New Agent Greeting Was Misclassified As Chat Closing
+- Symptom:
+  - In a resumed Lenovo chat, a fresh operator handoff message like `Thank you for contacting Lenovo. My name is Kartik, and I’ll be glad to assist you today.` triggered the `closing_polite` path.
+  - The bot then sent `Before we end, please confirm the case ID.`, which was obviously out of place and made the bot look like it was not reading the live context.
+- Cause:
+  - Intent detection matched the phrase `thank you for contacting` too early and had no dedicated greeting/handoff intent for a new operator introducing themselves at the start of their turn.
+- Mitigation:
+  - Added a dedicated `agent_intro` intent before the closing matcher.
+  - Added deterministic handling for that intent so the bot now briefly re-anchors the existing case and asks for current status / pending step / next deadline instead of talking as if the chat is ending.
+- Status:
+  - Fixed in code and locally replayed against the exact Kartik handoff text.
+
+## 2026-03-14 — Resumed Case ID Could Be Lost When Only The Customer Mentioned It
+- Symptom:
+  - Some resumed cases continued from the right order and facts, but internal state still showed an empty `latest_case_id`, which weakened later follow-up replies.
+- Cause:
+  - `latest_case_id` was only extracted from operator-side messages in `_update_case_memory()`, while many resumed cases first introduced the `Case ID` in the customer-side follow-up message.
+- Mitigation:
+  - Extended customer-side case-memory updates so case IDs found in customer transcript messages are also promoted into `latest_case_id`.
+- Status:
+  - Fixed in code; verified locally on the `C004094813` Lenovo case.

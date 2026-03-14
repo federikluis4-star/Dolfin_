@@ -809,6 +809,11 @@ class CopilotSession:
         asks = []
         if intent == "consumer_type_question":
             return asks
+        if intent == "agent_intro":
+            asks.append("confirm the current status of the case")
+            asks.append("explain exactly what is still pending")
+            asks.append("give the written deadline for completion")
+            return asks
         if intent in {"hold_request", "keepalive"}:
             asks.append("tell me the exact next step and timeline")
             return asks
@@ -2119,6 +2124,9 @@ Before answering, silently proofread the message for grammar and clarity."""
             if any(x in lowered for x in ["thank you for confirming", "thank you for staying connected", "sure, diana", "thank you, diana"]):
                 self._append_unique(self.confirmed_facts, "Lenovo acknowledged the case is still under review")
         else:
+            ids = self._extract_case_ids(t)
+            if ids:
+                self.latest_case_id = ids[-1].upper()
             if any(x in lowered for x in ["written basis", "policy basis"]):
                 self._append_unique(self.unresolved_demands, "written basis for withholding the refund")
             if "case id" in lowered:
@@ -2175,6 +2183,11 @@ Before answering, silently proofread the message for grammar and clarity."""
         t = self._operator_text(text).lower()
         if any(x in t for x in ["retail consumer or a small business", "small business or a retail consumer"]):
             return "consumer_type_question"
+        if (
+            any(x in t for x in ["my name is", "glad to assist you today", "glad to assist", "assist you today"])
+            and not any(x in t for x in ["have a great day ahead", "anything else i can help you with today", "before we end"])
+        ):
+            return "agent_intro"
         if any(x in t for x in ["still connected", "checking in to confirm whether we are still connected"]):
             return "keepalive"
         if any(x in t for x in ["place this chat on hold", "please stay connected", "stay connected", "on hold for about", "stay online with me"]):
@@ -2234,6 +2247,8 @@ Before answering, silently proofread the message for grammar and clarity."""
         intent = self.infer_agent_intent(agent_text or self.last_agent_msg)
         if intent == "consumer_type_question":
             return "answer the operator's classification question briefly, then keep the case moving"
+        if intent == "agent_intro":
+            return "briefly restate the unresolved case and force a concrete status update, pending step, and deadline"
         if intent == "keepalive":
             return "confirm connection and force a concrete next step"
         if intent == "hold_request":
@@ -2286,6 +2301,7 @@ Before answering, silently proofread the message for grammar and clarity."""
     def _deterministic_reply_intents(self):
         return {
             "consumer_type_question",
+            "agent_intro",
             "hold_request",
             "keepalive",
             "soft_stall",
@@ -2459,6 +2475,13 @@ Before answering, silently proofread the message for grammar and clarity."""
 
         if intent == "consumer_type_question":
             return "I am a retail consumer."
+        if intent == "agent_intro":
+            if self._should_resume_existing_case():
+                return self._follow_up_opening_message()
+            return (
+                f"I am following up on order {order}. "
+                "Please confirm the current case status, explain exactly what is still pending, and give the written deadline for completion."
+            )
         if self._explicit_field_request(agent_text, "email"):
             return f"The email on the order is {normalize_customer_email(self.customer_email)}."
         if self._explicit_field_request(agent_text, "phone"):
@@ -2834,6 +2857,11 @@ Before answering, silently proofread the message for grammar and clarity."""
             return msg.startswith("my name is") or "name is" in msg
         if intent == "consumer_type_question":
             return "retail consumer" in msg or "small business" in msg
+        if intent == "agent_intro":
+            return (
+                ("following up" in msg or "order" in msg or "case id" in msg)
+                and ("current status" in msg or "pending" in msg or "deadline" in msg)
+            )
         if intent == "keepalive":
             return "still here" in msg or "connected" in msg or msg.startswith("yes")
         if intent == "hold_request":

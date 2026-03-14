@@ -480,3 +480,15 @@ Use one entry per significant work block.
   - On this case pattern, the bot now directly addresses the operator's latest factual claim instead of repeating the earlier generic `escalation owner + written policy + deadline` bundle.
 - Issues/Notes:
   - This specifically targets the Lenovo `1,405 miles away` response pattern that previously exposed the bot's templated behavior.
+
+## 2026-03-14
+- Scope: Better reading of operator greetings and persisted case IDs during resumed chats.
+- Actions:
+  - Added a dedicated `agent_intro` intent for operator greetings like `Thank you for contacting Lenovo. My name is ... I’ll be glad to assist you today`, so these are no longer misread as closing messages.
+  - Updated deterministic reply logic so a new operator introduction now re-anchors the unresolved case and asks for current status / pending step / next deadline instead of replying with `Before we end...`.
+  - Updated customer-side case-memory extraction so `Case ID` values mentioned in the customer's own transcript are also persisted into `latest_case_id`, not only IDs mentioned by the operator.
+- Result:
+  - In resumed Lenovo chats, the bot no longer treats a fresh agent handoff greeting as if the conversation is ending.
+  - Resumed follow-ups can now keep using the known `case ID` even when that ID originally appeared in the customer's own message rather than in an operator reply.
+- Issues/Notes:
+  - This was driven by a live handoff where `Kartik ... I’ll be glad to assist you today` was incorrectly classified as `closing_polite`.
