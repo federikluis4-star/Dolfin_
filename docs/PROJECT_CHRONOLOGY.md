@@ -430,3 +430,15 @@ Use one entry per significant work block.
   - A raw intake block like the `Luna_Ca / 4649779458 / C004094813 / 48 часов / время уже вышло` example now launches directly into a proper overdue follow-up case flow without manual post-launch fixing.
 - Issues/Notes:
   - The parser is still heuristic, so labeled lines remain the most reliable format, but the resumed-case path is now materially stronger for mixed Russian/English operator notes.
+
+## 2026-03-14
+- Scope: Free-form Russian intake parsing for new and resumed support cases.
+- Actions:
+  - Extended `web_ui.py` so one-block intake can now extract `profile`, `order`, `email`, `phone`, `case ID`, and promised wait windows directly from ordinary Russian sentences instead of relying only on clean field labels.
+  - Added support for inline lines such as `Order Number 4649779458`, `Case ID C004094813`, and mixed Russian wording such as `профиль Luna_Ca`, `подождать 48 часов`, and `срок уже вышел`.
+  - Hardened profile detection so the first loose line is only treated as the Dolphin profile when it actually looks like a profile token, rather than blindly consuming arbitrary free-form text.
+  - Reused the broader extraction logic in the case-update parser so later manual updates can also be pasted in a more natural format.
+- Result:
+  - Users can now paste a much messier Russian case summary into the browser UI, and the bot still starts from the right customer/order/case-follow-up state with far less manual cleanup.
+- Issues/Notes:
+  - Clean labels are still the safest format, but the parser now degrades much more gracefully when the intake text is semi-structured or fully narrative.

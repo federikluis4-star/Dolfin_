@@ -179,3 +179,18 @@ Document every meaningful runtime failure and mitigation.
   - Added session seeding so the bot receives that metadata as real state before generating the first message.
 - Status:
   - Fixed in code; verified locally on the `Luna_Ca / 4649779458 / C004094813 / 48 часов / время уже вышло` intake example.
+
+## 2026-03-14 — Free-Form Russian Intake Still Needed Too Many Explicit Labels
+- Symptom:
+  - The browser intake worked well for neatly labeled blocks, but much messier Russian text could still lose important fields when the user pasted them inline inside normal sentences.
+  - Lines such as `Order Number 4649779458` or `Case ID C004094813` were reliable, but more narrative phrasing like `профиль Luna_Ca ... подождать 48 часов ... срок уже вышел` still depended too much on lucky line boundaries.
+- Cause:
+  - Intake parsing mainly relied on exact label matches and line-by-line heuristics instead of scanning the whole pasted block for structured tokens embedded in ordinary prose.
+  - The first loose line was also treated as the Dolphin profile too aggressively, which could misclassify arbitrary narrative text as a profile name.
+- Mitigation:
+  - Added whole-text extraction for `profile`, `email`, `phone`, `order number`, `case ID`, wait windows, and expired-wait markers.
+  - Added inline label parsing for same-line values such as `Order Number 4649779458` and `Case ID C004094813`.
+  - Tightened profile detection so only token-like profile strings are promoted into `profile_name`.
+  - Reused the same broader extraction helpers in the case-update parser.
+- Status:
+  - Fixed in code; syntax-checked and locally replayed against semi-structured and free-form Russian intake examples.

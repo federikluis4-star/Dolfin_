@@ -185,66 +185,110 @@ def _detect_intake_key(raw_line: str) -> tuple[str, str]:
         left = line.strip().lower()
         right = ""
 
-    key_map = {
-        "profile": "profile_name",
-        "dolphin": "profile_name",
-        "dolphin profile": "profile_name",
-        "профиль": "profile_name",
-        "name": "customer_name",
-        "customer name": "customer_name",
-        "имя": "customer_name",
-        "email": "customer_email",
-        "e-mail": "customer_email",
-        "почта": "customer_email",
-        "mail": "customer_email",
-        "phone": "customer_phone",
-        "phone number": "customer_phone",
-        "телефон": "customer_phone",
-        "order": "order_num",
-        "order number": "order_num",
-        "order #": "order_num",
-        "номер заказа": "order_num",
-        "store": "store",
-        "shop": "store",
-        "магазин": "store",
-        "case": "case_type",
-        "case type": "case_type",
-        "тип": "case_type",
-        "case id": "resume_case_id",
-        "ticket": "resume_case_id",
-        "reference": "resume_case_id",
-        "wait": "resume_follow_up_deadline",
-        "timeline": "resume_follow_up_deadline",
-        "deadline": "resume_follow_up_deadline",
-        "срок": "resume_follow_up_deadline",
-        "problem": "details",
-        "issue": "details",
-        "details": "details",
-        "comment": "details",
-        "проблема": "details",
-        "детали": "details",
-        "описание": "details",
-    }
-    return key_map.get(left, ""), right
+    key_aliases = [
+        ("dolphin profile", "profile_name"),
+        ("customer name", "customer_name"),
+        ("phone number", "customer_phone"),
+        ("order number", "order_num"),
+        ("order #", "order_num"),
+        ("номер заказа", "order_num"),
+        ("customer email", "customer_email"),
+        ("номер телефона", "customer_phone"),
+        ("case type", "case_type"),
+        ("case id", "resume_case_id"),
+        ("номер кейса", "resume_case_id"),
+        ("номер дела", "resume_case_id"),
+        ("электронная почта", "customer_email"),
+        ("dolphin", "profile_name"),
+        ("profile", "profile_name"),
+        ("профиль", "profile_name"),
+        ("email", "customer_email"),
+        ("e-mail", "customer_email"),
+        ("почта", "customer_email"),
+        ("mail", "customer_email"),
+        ("phone", "customer_phone"),
+        ("телефон", "customer_phone"),
+        ("order", "order_num"),
+        ("заказ", "order_num"),
+        ("store", "store"),
+        ("shop", "store"),
+        ("магазин", "store"),
+        ("case", "case_type"),
+        ("тип", "case_type"),
+        ("кейс", "resume_case_id"),
+        ("ticket", "resume_case_id"),
+        ("reference", "resume_case_id"),
+        ("wait", "resume_follow_up_deadline"),
+        ("timeline", "resume_follow_up_deadline"),
+        ("deadline", "resume_follow_up_deadline"),
+        ("ждать", "resume_follow_up_deadline"),
+        ("срок", "resume_follow_up_deadline"),
+        ("problem", "details"),
+        ("issue", "details"),
+        ("details", "details"),
+        ("comment", "details"),
+        ("проблема", "details"),
+        ("детали", "details"),
+        ("описание", "details"),
+        ("name", "customer_name"),
+        ("имя", "customer_name"),
+    ]
+    key_map = dict(key_aliases)
+    direct_match = key_map.get(left, "")
+    if direct_match:
+        return direct_match, right
+    for alias, target in key_aliases:
+        match = re.match(rf"^{re.escape(alias)}(?:\s*[:#-]\s*|\s+)(.+?)\s*$", line, flags=re.I)
+        if match:
+            candidate = match.group(1).strip()
+            if target == "profile_name" and not _looks_like_profile_name(candidate):
+                continue
+            if target == "customer_email" and not _looks_like_email(candidate):
+                continue
+            if target == "customer_phone" and not _looks_like_phone(candidate):
+                continue
+            if target == "order_num" and not _looks_like_order_number(candidate):
+                continue
+            if target == "resume_case_id" and not _extract_case_id(candidate):
+                continue
+            if target == "resume_follow_up_deadline" and not (_extract_follow_up_deadline(candidate) or _extract_wait_expired(candidate)):
+                continue
+            return target, candidate
+    return "", ""
 
 
 def _looks_like_email(value: str) -> bool:
-    return bool(re.search(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", value or ""))
+    return bool(re.fullmatch(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", (value or "").strip()))
 
 
 def _looks_like_phone(value: str) -> bool:
+    if re.search(r"[A-Za-zА-Яа-я]", value or ""):
+        return False
     digits = re.sub(r"\D+", "", value or "")
     return 7 <= len(digits) <= 15
 
 
 def _looks_like_order_number(value: str) -> bool:
     text = (value or "").strip()
+    if " " in text:
+        return False
     compact = re.sub(r"[^A-Za-z0-9]+", "", text)
     if not compact or _looks_like_email(text):
         return False
     if compact.upper() in {"INR", "RNR", "DOA"}:
         return False
+    if re.search(r"[A-Za-zА-Яа-я]", text) and not re.fullmatch(r"[A-Za-z0-9._#-]+", text):
+        return False
     return len(compact) >= 6 and any(ch.isdigit() for ch in compact)
+
+
+def _looks_like_profile_name(value: str) -> bool:
+    text = (value or "").strip()
+    if not text or " " in text or _looks_like_email(text) or _looks_like_phone(text) or _extract_case_id(text):
+        return False
+    if not re.fullmatch(r"[A-Za-z0-9._-]{3,40}", text):
+        return False
+    return any(ch.isalpha() for ch in text)
 
 
 def _looks_like_person_name(value: str) -> bool:
@@ -274,34 +318,109 @@ def _extract_case_id(value: str) -> str:
     return match.group(0).upper() if match else ""
 
 
+def _extract_profile_name(value: str) -> str:
+    text = (value or "").strip()
+    if not text:
+        return ""
+    for pattern in [
+        r"(?:dolphin\s+profile|profile|профиль)\s*[:#-]?\s*([A-Za-z0-9._-]{3,40})\b",
+    ]:
+        match = re.search(pattern, text, flags=re.I)
+        if match:
+            candidate = match.group(1).strip()
+            if _looks_like_profile_name(candidate):
+                return candidate
+    for line in text.splitlines():
+        candidate = line.strip()
+        if _looks_like_profile_name(candidate):
+            return candidate
+    return ""
+
+
+def _extract_email(value: str) -> str:
+    match = re.search(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", value or "")
+    return match.group(0).strip() if match else ""
+
+
+def _extract_phone(value: str) -> str:
+    labeled = re.search(
+        r"(?:phone(?:\s+number)?|телефон|номер\s+телефона)\s*[:#-]?\s*((?:\+?\d|\(\d)[\d()\s.-]{6,}\d)",
+        value or "",
+        flags=re.I,
+    )
+    if labeled:
+        candidate = labeled.group(1).strip(" ,.;")
+        if _looks_like_phone(candidate):
+            return candidate
+    for match in re.finditer(r"(?:\+?\d|\(\d)[\d()\s.-]{6,}\d", value or ""):
+        candidate = match.group(0).strip(" ,.;")
+        if not _looks_like_phone(candidate):
+            continue
+        if any(token in candidate for token in ("(", ")", " ", "-", ".")):
+            return candidate
+    return ""
+
+
+def _extract_order_number(value: str) -> str:
+    text = (value or "").strip()
+    if not text:
+        return ""
+    for pattern in [
+        r"(?:order(?:\s+number)?|order\s*#|номер\s+заказа|заказ(?:а|у|е)?)\s*[:#-]?\s*([A-Za-z0-9-]{6,})\b",
+    ]:
+        match = re.search(pattern, text, flags=re.I)
+        if match:
+            candidate = match.group(1).strip()
+            if _looks_like_order_number(candidate):
+                return candidate
+    return ""
+
+
+def _extract_customer_name(value: str) -> str:
+    text = (value or "").strip()
+    if not text:
+        return ""
+    for pattern in [
+        r"(?:customer\s+name|name|имя|клиент)\s*[:#-]?\s*([A-Za-z][A-Za-z .'-]{2,60})",
+    ]:
+        match = re.search(pattern, text, flags=re.I)
+        if not match:
+            continue
+        candidate = match.group(1).strip(" ,.;")
+        if _looks_like_person_name(candidate):
+            return candidate
+    return ""
+
+
 def _extract_follow_up_deadline(value: str) -> str:
     text = (value or "").strip()
     if not text:
         return ""
-    russian_business_range = re.search(r"(\d+)\s*-\s*(\d+)\s*рабоч(?:их|ие)?\s*дн", text, flags=re.I)
+    range_sep = r"\s*[-–—]\s*"
+    russian_business_range = re.search(rf"(\d+){range_sep}(\d+)\s*рабоч(?:их|ие)?\s*дн", text, flags=re.I)
     if russian_business_range:
         return f"{russian_business_range.group(1)}-{russian_business_range.group(2)} business days"
     russian_business_days = re.search(r"(\d+)\s*рабоч(?:их|ие)?\s*дн", text, flags=re.I)
     if russian_business_days:
         return f"{russian_business_days.group(1)} business days"
-    russian_hours_range = re.search(r"(\d+)\s*-\s*(\d+)\s*час", text, flags=re.I)
+    russian_hours_range = re.search(rf"(\d+){range_sep}(\d+)\s*час", text, flags=re.I)
     if russian_hours_range:
         return f"{russian_hours_range.group(1)}-{russian_hours_range.group(2)} hours"
     russian_hours = re.search(r"(\d+)\s*час", text, flags=re.I)
     if russian_hours:
         return f"{russian_hours.group(1)} hours"
-    russian_days_range = re.search(r"(\d+)\s*-\s*(\d+)\s*дн", text, flags=re.I)
+    russian_days_range = re.search(rf"(\d+){range_sep}(\d+)\s*дн", text, flags=re.I)
     if russian_days_range:
         return f"{russian_days_range.group(1)}-{russian_days_range.group(2)} days"
     russian_days = re.search(r"(\d+)\s*дн", text, flags=re.I)
     if russian_days:
         return f"{russian_days.group(1)} days"
     for pattern in [
-        r"\b\d+\s*-\s*\d+\s*business\s*days?\b",
+        rf"\b\d+{range_sep}\d+\s*business\s*days?\b",
         r"\b\d+\s*business\s*days?\b",
-        r"\b\d+\s*-\s*\d+\s*hours?\b",
+        rf"\b\d+{range_sep}\d+\s*hours?\b",
         r"\b\d+\s*hours?\b",
-        r"\b\d+\s*-\s*\d+\s*days?\b",
+        rf"\b\d+{range_sep}\d+\s*days?\b",
         r"\b\d+\s*days?\b",
     ]:
         match = re.search(pattern, text, flags=re.I)
@@ -322,11 +441,23 @@ def _extract_wait_expired(value: str) -> bool:
         "already passed",
         "already expired",
         "window has passed",
+        "window already passed",
+        "deadline passed",
+        "deadline has passed",
+        "time is up",
+        "expired already",
         "время уже вышло",
         "срок уже вышел",
+        "срок уже истек",
+        "срок уже истёк",
         "время прошло",
+        "время уже прошло",
         "срок прошел",
         "срок прошёл",
+        "срок истек",
+        "срок истёк",
+        "48 часов прошло",
+        "48 часов уже прошло",
     ]
     return any(marker in text for marker in markers)
 
@@ -402,26 +533,33 @@ def parse_intake_block(raw_text: str) -> dict:
 
         loose_lines.append(line)
 
-    if loose_lines and not fields["profile_name"]:
+    if not fields["profile_name"]:
+        fields["profile_name"] = _extract_profile_name(raw_text)
+    if loose_lines and not fields["profile_name"] and _looks_like_profile_name(loose_lines[0]):
         fields["profile_name"] = loose_lines.pop(0)
+    elif loose_lines and fields["profile_name"] and loose_lines[0].strip() == fields["profile_name"]:
+        loose_lines.pop(0)
 
     remaining_lines: list[str] = []
     for line in loose_lines:
         upper = line.strip().upper()
+        metadata_like_line = len(line) <= 64 and "," not in line and "." not in line
         if not fields["resume_case_id"]:
             extracted_case_id = _extract_case_id(line)
             if extracted_case_id:
                 fields["resume_case_id"] = extracted_case_id
                 if _extract_wait_expired(line):
                     fields["resume_wait_expired"] = True
-                continue
+                if metadata_like_line:
+                    continue
         if not fields["resume_follow_up_deadline"]:
             extracted_deadline = _extract_follow_up_deadline(line)
             if extracted_deadline:
                 fields["resume_follow_up_deadline"] = extracted_deadline
                 if _extract_wait_expired(line):
                     fields["resume_wait_expired"] = True
-                continue
+                if metadata_like_line:
+                    continue
         if _extract_wait_expired(line):
             fields["resume_wait_expired"] = True
         if not fields["customer_email"] and _looks_like_email(line):
@@ -463,6 +601,24 @@ def parse_intake_block(raw_text: str) -> dict:
         if detail_lines and not fields["customer_phone"] and _looks_like_phone(detail_lines[0]):
             fields["customer_phone"] = detail_lines.pop(0)
         fields["details"] = "\n".join(detail_lines).strip()
+
+    source_text = raw_text or ""
+    if not fields["profile_name"]:
+        fields["profile_name"] = _extract_profile_name(source_text)
+    if not fields["customer_email"]:
+        fields["customer_email"] = _extract_email(source_text)
+    if not fields["customer_phone"]:
+        fields["customer_phone"] = _extract_phone(source_text)
+    if not fields["order_num"]:
+        fields["order_num"] = _extract_order_number(source_text)
+    if not fields["customer_name"]:
+        fields["customer_name"] = _extract_customer_name(source_text)
+    if not fields["resume_case_id"]:
+        fields["resume_case_id"] = _extract_case_id(source_text)
+    if not fields["resume_follow_up_deadline"]:
+        fields["resume_follow_up_deadline"] = _extract_follow_up_deadline(source_text)
+    if _extract_wait_expired(source_text):
+        fields["resume_wait_expired"] = True
 
     profile_meta = _parse_profile_metadata(fields["profile_name"])
     if not fields["store"]:
@@ -576,6 +732,18 @@ def parse_case_update_block(raw_text: str) -> dict:
     details = "\n".join([*detail_lines, *remaining_lines]).strip()
     if details:
         fields["details"] = details
+
+    source_text = raw_text or ""
+    if not fields["customer_email"]:
+        fields["customer_email"] = _extract_email(source_text)
+    if not fields["customer_phone"]:
+        fields["customer_phone"] = _extract_phone(source_text)
+    if not fields["order_num"]:
+        fields["order_num"] = _extract_order_number(source_text)
+    if not fields["customer_name"]:
+        fields["customer_name"] = _extract_customer_name(source_text)
+    if not fields["details"]:
+        fields["details"] = source_text.strip()
 
     if not any(value.strip() for value in fields.values()):
         raise RuntimeError("Не удалось распознать новые данные кейса.")
