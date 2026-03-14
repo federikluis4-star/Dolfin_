@@ -184,13 +184,16 @@ Document every meaningful runtime failure and mitigation.
 - Symptom:
   - The browser intake worked well for neatly labeled blocks, but much messier Russian text could still lose important fields when the user pasted them inline inside normal sentences.
   - Lines such as `Order Number 4649779458` or `Case ID C004094813` were reliable, but more narrative phrasing like `профиль Luna_Ca ... подождать 48 часов ... срок уже вышел` still depended too much on lucky line boundaries.
+  - Even when extraction succeeded, the raw `details` field could still contain duplicated profile/contact metadata, which weakened the problem summary passed into the bot.
 - Cause:
   - Intake parsing mainly relied on exact label matches and line-by-line heuristics instead of scanning the whole pasted block for structured tokens embedded in ordinary prose.
   - The first loose line was also treated as the Dolphin profile too aggressively, which could misclassify arbitrary narrative text as a profile name.
+  - After extraction, the intake flow did not scrub already-promoted metadata back out of the final `details` string.
 - Mitigation:
   - Added whole-text extraction for `profile`, `email`, `phone`, `order number`, `case ID`, wait windows, and expired-wait markers.
   - Added inline label parsing for same-line values such as `Order Number 4649779458` and `Case ID C004094813`.
   - Tightened profile detection so only token-like profile strings are promoted into `profile_name`.
   - Reused the same broader extraction helpers in the case-update parser.
+  - Added `details` cleanup so extracted profile/order/contact/`Case ID` metadata is removed from the support-issue summary while preserving the actual problem narrative and wait-window context.
 - Status:
   - Fixed in code; syntax-checked and locally replayed against semi-structured and free-form Russian intake examples.

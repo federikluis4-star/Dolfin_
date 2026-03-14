@@ -462,6 +462,57 @@ def _extract_wait_expired(value: str) -> bool:
     return any(marker in text for marker in markers)
 
 
+def _clean_intake_details(details: str, fields: dict) -> str:
+    text = (details or "").strip()
+    if not text:
+        return ""
+
+    removal_patterns: list[str] = []
+
+    def add_labeled_pattern(labels: list[str], value: str) -> None:
+        cleaned = (value or "").strip()
+        if not cleaned:
+            return
+        escaped = re.escape(cleaned)
+        label_group = "|".join(re.escape(label) for label in labels)
+        removal_patterns.append(rf"(?:{label_group})\s*[:#-]?\s*{escaped}\b")
+
+    add_labeled_pattern(["dolphin profile", "profile", "профиль"], fields.get("profile_name", ""))
+    add_labeled_pattern(["customer name", "name", "имя"], fields.get("customer_name", ""))
+    add_labeled_pattern(["customer email", "email", "e-mail", "почта", "электронная почта"], fields.get("customer_email", ""))
+    add_labeled_pattern(["phone", "phone number", "телефон", "номер телефона"], fields.get("customer_phone", ""))
+    add_labeled_pattern(["order", "order number", "order #", "номер заказа", "заказ", "заказа", "заказу"], fields.get("order_num", ""))
+    add_labeled_pattern(["case id", "номер кейса", "номер дела", "кейс"], fields.get("resume_case_id", ""))
+
+    for pattern in removal_patterns:
+        text = re.sub(pattern, " ", text, flags=re.I)
+
+    for key in ["customer_email", "customer_phone", "resume_case_id"]:
+        value = (fields.get(key) or "").strip()
+        if value:
+            text = re.sub(re.escape(value), " ", text, flags=re.I)
+
+    sentences: list[str] = []
+    for fragment in re.split(r"(?<=[.!?])\s+|\n+", text):
+        candidate = fragment.strip(" ,;:-")
+        if not candidate:
+            continue
+        if not re.search(r"[A-Za-zА-Яа-я]", candidate):
+            continue
+        if not re.search(r"[A-Za-zА-Яа-я]{3,}", candidate):
+            continue
+        sentences.append(candidate)
+
+    cleaned = " ".join(sentences) if sentences else text
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    cleaned = re.sub(r"\s+([.,!?])", r"\1", cleaned)
+    cleaned = re.sub(r"([.,!?])(?=[A-Za-zА-Яа-я])", r"\1 ", cleaned)
+    cleaned = re.sub(r"(?:\s*[,;:]\s*){2,}", ", ", cleaned)
+    cleaned = re.sub(r"(^|[.!?]\s*)[,;:-]+\s*", r"\1", cleaned)
+    cleaned = cleaned.strip(" ,;:-")
+    return cleaned
+
+
 def _case_binding_key(store: str, order_num: str) -> str:
     store_key = re.sub(r"[^a-z0-9]+", "-", (store or "unknown").lower()).strip("-") or "unknown"
     order_key = re.sub(r"[^a-z0-9]+", "", (order_num or "").lower()) or "noorder"
@@ -619,6 +670,8 @@ def parse_intake_block(raw_text: str) -> dict:
         fields["resume_follow_up_deadline"] = _extract_follow_up_deadline(source_text)
     if _extract_wait_expired(source_text):
         fields["resume_wait_expired"] = True
+
+    fields["details"] = _clean_intake_details(fields["details"], fields)
 
     profile_meta = _parse_profile_metadata(fields["profile_name"])
     if not fields["store"]:

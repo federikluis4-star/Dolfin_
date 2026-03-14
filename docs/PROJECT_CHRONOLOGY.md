@@ -438,7 +438,9 @@ Use one entry per significant work block.
   - Added support for inline lines such as `Order Number 4649779458`, `Case ID C004094813`, and mixed Russian wording such as `профиль Luna_Ca`, `подождать 48 часов`, and `срок уже вышел`.
   - Hardened profile detection so the first loose line is only treated as the Dolphin profile when it actually looks like a profile token, rather than blindly consuming arbitrary free-form text.
   - Reused the broader extraction logic in the case-update parser so later manual updates can also be pasted in a more natural format.
+  - Added intake-side `details` cleanup so free-form metadata like profile, order, email, phone, and `Case ID` no longer pollute the problem summary that the bot sees.
 - Result:
   - Users can now paste a much messier Russian case summary into the browser UI, and the bot still starts from the right customer/order/case-follow-up state with far less manual cleanup.
+  - The problem summary now stays focused on the actual support issue and timeline instead of echoing contact metadata back into the bot prompt.
 - Issues/Notes:
   - Clean labels are still the safest format, but the parser now degrades much more gracefully when the intake text is semi-structured or fully narrative.
