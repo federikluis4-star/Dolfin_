@@ -492,3 +492,13 @@ Use one entry per significant work block.
   - Resumed follow-ups can now keep using the known `case ID` even when that ID originally appeared in the customer's own message rather than in an operator reply.
 - Issues/Notes:
   - This was driven by a live handoff where `Kartik ... I’ll be glad to assist you today` was incorrectly classified as `closing_polite`.
+
+## 2026-03-14
+- Scope: More human handling of `let me review` operator replies.
+- Actions:
+  - Added a dedicated `reviewing_case` intent for messages like `Let me review the order details for you` and `Rest assured, I will do my best to resolve this concern`.
+  - Updated deterministic reply logic so these review-in-progress replies now produce a short acknowledgement plus a request for the exact step under review, the remaining blocker, and the next update deadline.
+- Result:
+  - The bot no longer jumps straight to a broad escalation bundle on a simple `let me review` message and instead sounds more patient and human while still keeping pressure on the concrete next update.
+- Issues/Notes:
+  - This came from the offline replay where the previous response was technically on-topic but too wide and too templated for that stage of the conversation.

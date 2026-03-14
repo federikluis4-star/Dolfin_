@@ -814,6 +814,11 @@ class CopilotSession:
             asks.append("explain exactly what is still pending")
             asks.append("give the written deadline for completion")
             return asks
+        if intent == "reviewing_case":
+            asks.append("tell me what exact step you are reviewing")
+            asks.append("confirm what is still pending")
+            asks.append("give the next update deadline before you return")
+            return asks
         if intent in {"hold_request", "keepalive"}:
             asks.append("tell me the exact next step and timeline")
             return asks
@@ -2188,6 +2193,8 @@ Before answering, silently proofread the message for grammar and clarity."""
             and not any(x in t for x in ["have a great day ahead", "anything else i can help you with today", "before we end"])
         ):
             return "agent_intro"
+        if any(x in t for x in ["let me review the order details", "let me review the details", "rest assured", "i will do my best to resolve this concern", "allow me a moment to review"]):
+            return "reviewing_case"
         if any(x in t for x in ["still connected", "checking in to confirm whether we are still connected"]):
             return "keepalive"
         if any(x in t for x in ["place this chat on hold", "please stay connected", "stay connected", "on hold for about", "stay online with me"]):
@@ -2249,6 +2256,8 @@ Before answering, silently proofread the message for grammar and clarity."""
             return "answer the operator's classification question briefly, then keep the case moving"
         if intent == "agent_intro":
             return "briefly restate the unresolved case and force a concrete status update, pending step, and deadline"
+        if intent == "reviewing_case":
+            return "allow the operator to review briefly, but require the exact step under review, the pending blocker, and the next update deadline"
         if intent == "keepalive":
             return "confirm connection and force a concrete next step"
         if intent == "hold_request":
@@ -2302,6 +2311,7 @@ Before answering, silently proofread the message for grammar and clarity."""
         return {
             "consumer_type_question",
             "agent_intro",
+            "reviewing_case",
             "hold_request",
             "keepalive",
             "soft_stall",
@@ -2481,6 +2491,11 @@ Before answering, silently proofread the message for grammar and clarity."""
             return (
                 f"I am following up on order {order}. "
                 "Please confirm the current case status, explain exactly what is still pending, and give the written deadline for completion."
+            )
+        if intent == "reviewing_case":
+            return (
+                "That's fine. "
+                "When you finish reviewing, please tell me what exact step you are checking, what is still pending, and the next update deadline."
             )
         if self._explicit_field_request(agent_text, "email"):
             return f"The email on the order is {normalize_customer_email(self.customer_email)}."
@@ -2861,6 +2876,11 @@ Before answering, silently proofread the message for grammar and clarity."""
             return (
                 ("following up" in msg or "order" in msg or "case id" in msg)
                 and ("current status" in msg or "pending" in msg or "deadline" in msg)
+            )
+        if intent == "reviewing_case":
+            return (
+                ("that's fine" in msg or "when you finish reviewing" in msg)
+                and ("what exact step" in msg or "pending" in msg or "next update deadline" in msg)
             )
         if intent == "keepalive":
             return "still here" in msg or "connected" in msg or msg.startswith("yes")

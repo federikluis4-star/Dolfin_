@@ -258,3 +258,15 @@ Document every meaningful runtime failure and mitigation.
   - Extended customer-side case-memory updates so case IDs found in customer transcript messages are also promoted into `latest_case_id`.
 - Status:
   - Fixed in code; verified locally on the `C004094813` Lenovo case.
+
+## 2026-03-14 — `Let Me Review` Replies Still Triggered An Overly Broad Escalation Bundle
+- Symptom:
+  - On operator messages like `Let me review the order details for you. Rest assured, I will do my best to resolve this concern.`, the bot still answered with a wide escalation demand for case owner, written policy, and full refund deadline.
+  - That response was not totally wrong, but it felt too stiff and too aggressive for a simple in-progress review acknowledgment.
+- Cause:
+  - There was no dedicated intent for review-in-progress replies, so the planner fell back to the general pressure path once the case ID was already known.
+- Mitigation:
+  - Added a dedicated `reviewing_case` intent and deterministic reply path.
+  - The new response now says, in effect, `That's fine. When you finish reviewing, tell me what exact step you are checking, what is still pending, and the next update deadline.`
+- Status:
+  - Fixed in code; replayed locally in the offline dialogue test.
