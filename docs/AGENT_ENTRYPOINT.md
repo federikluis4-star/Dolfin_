@@ -27,6 +27,10 @@ Current intended flow:
 ## Current Repository Shape
 Main files:
 - `bot.py`: the entire runtime application.
+- `web_ui.py`: local browser control panel that wraps `bot.py` in a PTY instead of replacing its logic.
+- `ui_runtime.py`: shared PTY/session manager used by the UI wrappers.
+- `start_ui_server.sh`: background launcher for the local UI server.
+- `build_macos_app.sh`: builds a local macOS `.app` launcher that starts the UI server and opens the panel.
 - `README.md`: operator-facing setup and run instructions.
 - `AGENTS.md`: repository guardrails and mandatory documentation rules.
 - `docs/PROJECT_CHRONOLOGY.md`: chronological project log.
@@ -66,11 +70,14 @@ Important current implementation traits:
 - Lenovo flow is the most developed and most brittle integration.
 - The product currently depends on runtime heuristics rather than deterministic page contracts.
 - The reasoning layer now includes intent classification, contradiction tracking, negotiation memory, and a reply critic, but it is still embedded inside `bot.py`.
+- The browser UI and macOS launcher are thin transport layers over the interactive CLI; they do not duplicate orchestration logic.
 
 ## What Is Already Implemented
 From committed history and current working tree:
 - `.env`-based configuration exists.
 - Secrets are protected by `.gitignore` and git hooks.
+- A local web control panel exists for non-terminal operation while preserving the current CLI prompts.
+- A local macOS launcher app can now build and open that same control panel without a manual terminal command.
 - Repository guardrails already enforce chronology/error-log discipline.
 - OpenAI API usage is present in the working tree.
 - The bot can parse profile names for store/case hints.

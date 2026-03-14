@@ -11,6 +11,80 @@ Use one entry per significant work block.
 
 ---
 
+## 2026-03-11
+- Scope: Runtime bot hints and in-session case-data updates from the browser UI.
+- Actions:
+  - Added a runtime command queue shared between `web_ui.py`, `ui_runtime.py`, and `bot.py` so the live bot process can receive operator hints and case-data updates without a restart.
+  - Added `Подсказка боту` and `Обновить данные кейса` controls in the browser panel, both using free-form multi-line blocks instead of separate columns.
+  - Extended `bot.py` case memory with `operator_notes` and `pending_requested_field`, and taught the live loop to pause when the operator asks for missing `email/phone/order/name` until the user updates the case from the UI.
+  - Switched UI-launched sessions to fully non-interactive live mode so browser-driven runs do not stall on hidden CLI confirmation prompts.
+- Result:
+  - During a live dialogue, the operator can now inject strategy notes or missing customer data into the running bot session, and the bot can resume the same operator question after the missing data is supplied.
+- Issues/Notes:
+  - Runtime commands are consumed by the active bot loop; if the process is not running, the UI correctly rejects the action instead of queuing it for later.
+
+## 2026-03-11
+- Scope: One-block new-case intake in the browser UI.
+- Actions:
+  - Added a `Новый кейс одним блоком` flow in `web_ui.py` so operators can paste `profile + customer data + order + problem` into one textarea instead of filling separate fields.
+  - Added backend parsing for both labeled and simple ordered-line intake formats and converted that block directly into a `run_config` launch for `bot.py`.
+  - Saved the `case -> Dolphin profile` binding from the intake flow when `store/order` are known so the case list keeps the same profile-aware title format later.
+- Result:
+  - New cases can now be launched from a single pasted block, while the bot still receives structured startup data and skips the old sequential questionnaire.
+- Issues/Notes:
+  - The one-block parser is heuristic by design; strongly structured input still gives the most predictable extraction.
+
+## 2026-03-11
+- Scope: Transcript-backed case memory and wait-timer correction.
+- Actions:
+  - Switched the case dashboard timers in `web_ui.py` from generic `updated_at` saves to dialogue-aware anchors: `last_event_at` for elapsed time and `follow_up_anchor_at` for follow-up deadlines.
+  - Added transcript-backed repair logic in `bot.py` so follow-up anchors are re-derived from the saved agent transcript and stale case-memory timestamps do not shift promised wait windows.
+  - Extended the dashboard copy to make it explicit that the bot resumes from the full saved transcript file, not just the short tail shown in the UI.
+  - Cleaned the current Lenovo case memory/transcript from local test-only retry messages so the active case returned to the real stop point of `2026-03-11 00:43` America/Los_Angeles.
+- Result:
+  - The saved Lenovo case now shows `13` real transcript messages, the correct stop point, and a follow-up time of `2026-03-13 00:43` America/Los_Angeles while preserving full-dialogue context for future resume.
+- Issues/Notes:
+  - `updated_at` still tracks file-save time, but the UI no longer uses it as the source of truth for wait timers.
+
+## 2026-03-11
+- Scope: Local browser UI for non-terminal bot operation.
+- Actions:
+  - Added `web_ui.py`, a standalone local HTTP server that runs `bot.py` inside a pseudo-terminal so the existing `input()/print()` flow works unchanged.
+  - Exposed start, stop, send-input, and live-log polling endpoints for the browser panel.
+  - Built a single-page control panel for operators with process status, live terminal output, quick-answer buttons, and a dedicated multi-line block send mode for customer data entry.
+  - Updated `README.md` and `docs/AGENT_ENTRYPOINT.md` to document the browser-based entrypoint and clarify that it wraps the CLI runtime rather than replacing it.
+- Result:
+  - The project now has a usable local interface for operators who do not want to work directly in Terminal, while preserving the current runtime logic in `bot.py`.
+- Issues/Notes:
+  - The UI is intentionally thin and does not yet replace the sequential prompt model with structured forms or session dashboards.
+
+## 2026-03-11
+- Scope: macOS launcher app for the existing browser control panel.
+- Actions:
+  - Extracted the PTY-backed bot runner into `ui_runtime.py` so multiple operator interfaces can share one process-control layer.
+  - Added `start_ui_server.sh` to launch `web_ui.py` in the background, wait for readiness, and reuse the same local port if it is already running.
+  - Added `macos_launcher.applescript` plus `build_macos_app.sh` so the repo can generate a double-clickable `Support Copilot.app` launcher on macOS.
+  - Rewired `web_ui.py` to use the shared runtime module instead of keeping a duplicate bot-process manager inline.
+- Result:
+  - The project now has both a direct browser panel and a generated macOS application launcher on top of the same `bot.py` runtime.
+- Issues/Notes:
+  - A native Tk desktop window was attempted first but failed on the local system Python/Tk runtime, so the shipped app path is the macOS launcher around `web_ui.py`.
+
+## 2026-03-11
+- Scope: Case dashboard inside the local operator UI.
+- Actions:
+  - Added `/api/cases` in `web_ui.py` to read saved case memory from `logs/case_memory/`, normalize timestamps, and compute follow-up status from stored deadlines such as `48 hours`.
+  - Added a new `Кейсы` section to the browser panel with a saved-case list and a detailed `На чём остановились` card for the selected case.
+  - Surfaced human-readable next steps, last operator message, case ID, deadline, live elapsed/remaining wait timers, confirmed facts, unresolved demands, contradictions, and transcript tail directly in the UI.
+  - Added saved `Dolphin profile` binding plus manual `Запустить и продолжить` case launch flow, so operators can pick a case after the wait timer expires and resume the dialogue from that case.
+  - Extended `bot.py` case persistence from short `transcript_tail` storage to a full saved case transcript, with reload on startup and a wider reasoning window so the bot keeps the earlier topic/context when resuming dialogue.
+  - Updated `README.md` so the browser panel description now includes the case-status dashboard and manual resume flow.
+- Result:
+  - Operators can now open the UI, see which case is current, how long it has been waiting, manually launch bot continuation for the selected saved case, and rely on the bot to reload the full prior dialogue context.
+- Issues/Notes:
+  - The dashboard reflects persisted case memory, so it only updates after the runtime saves a case snapshot.
+  - Manual resume depends on a saved Dolphin profile name for the case and still uses the existing `bot.py` runtime flow under the hood.
+
 ## 2026-03-10
 - Scope: Lenovo widget recovery and pre-chat workflow stabilization to first operator handoff.
 - Actions:
@@ -268,3 +342,91 @@ Use one entry per significant work block.
   - The bot can now resume a paused Lenovo case with preserved outcome context instead of starting from a blank negotiation state.
 - Issues/Notes:
   - The live attach loop should be revalidated on the next clean operator exchange to confirm the new Lenovo `#chatInput` priority fully resolves `TYPED False`.
+
+## 2026-03-11
+- Scope: Dialogue-quality hardening for live operator chats.
+- Actions:
+  - Tightened the reply prompts and critic rules so the bot now targets a live-customer tone instead of scripted case-manager phrasing such as `I am assisting with a case`.
+  - Added reply polishing to strip meta openings, generic filler, duplicated sentences, and wrong/hardcoded case IDs before a message is sent.
+  - Added explicit handling for operator chat-closure warnings and direct customer-data requests so replies answer the exact point first.
+  - Replaced the fallback layer's hardcoded legacy case ID with the active persisted case ID from the current session.
+- Result:
+  - The bot now generates shorter, more natural operator-facing replies and is less likely to sound templated or reference the wrong case.
+- Issues/Notes:
+  - These communication changes are syntactically verified and spot-checked locally, but still need clean live-chat revalidation against a real operator transcript.
+
+## 2026-03-11
+- Scope: Legally grounded escalation strategy for refund and non-delivery chats.
+- Actions:
+  - Added a structured `legal_context` to the case snapshot so the reply planner gets fact-dependent legal anchors, forbidden overclaims, and preferred escalation asks.
+  - Tightened the prompts and critic so the bot can use short, grounded legal pressure around prompt refunds, written policy basis, and conditional billing-dispute preservation without bluffing.
+  - Upgraded fallback replies to push harder on written basis, escalation owner, refund deadlines, and conditional card-dispute rights when the operator stalls or denies without basis.
+  - Expanded `critical` detection for stronger legal phrases such as `billing dispute`, `Regulation Z`, and `card issuer`.
+- Result:
+  - The bot can now press operators with more legally informed language while staying closer to fact-based FTC/CFPB-style consumer-rights framing instead of generic threats.
+- Issues/Notes:
+  - This work was validated with syntax checks and local spot checks; a clean live-chat run is still needed to tune how often the new legal-pressure layer should appear automatically.
+
+## 2026-03-11
+- Scope: Automatic post-chat conversation audit.
+- Actions:
+  - Added a dedicated post-chat audit prompt and transcript heuristics to score human-likeness, template risk, persuasion quality, and legal grounding after a session ends.
+  - Added per-case markdown reports under `logs/post_chat_audits/` so completed chats can be reviewed without parsing raw `jsonl` traces manually.
+  - Hooked the audit into normal session shutdown and manual quit paths so the report is generated automatically after the dialogue ends.
+- Result:
+  - Each completed or manually stopped case can now produce a readable post-chat analysis showing whether the bot sounded human or templated and what to tune next.
+- Issues/Notes:
+  - The audit depends on the configured LLM for the best analysis quality, but it also falls back to local heuristics if the model call fails.
+
+## 2026-03-11
+- Scope: Dialogue intelligence repair after Lenovo transcript audit.
+- Actions:
+  - Rebuilt derived case memory from the full saved transcript on session load, so reopened chats no longer depend on stale `case_memory` snapshots for `latest_case_id`, escalation-owner facts, deadlines, or contradictions.
+  - Fixed the case-state heuristics so an escalation owner like `NA CSAT Case Manager` is retained even if a different operator later says a supervisor would provide the same resolution.
+  - Narrowed `next_best_asks()` after partial operator answers: once case ID, owner, or policy text are already known, the bot now shifts to the missing approval step and approval deadline instead of repeating the whole escalation bundle.
+  - Added more deterministic short replies for service-turn intents such as retail/small-business classification, hold requests, callback loops, policy-text responses, and polite chat closings.
+  - Tightened explicit field-request detection so internal mentions of `email` no longer trigger incorrect replies like `The email on the order is ...`.
+- Result:
+  - The Lenovo case `4650132646` now reloads with `CR000085559`, the correct escalation-owner context, and more human-looking short replies on operator housekeeping turns.
+- Issues/Notes:
+  - These logic fixes were syntax-checked and replayed locally against the saved Lenovo transcript, but still need the next live operator run to measure whether template risk drops materially in production chats.
+
+## 2026-03-14
+- Scope: Current-turn planner alignment for operator replies.
+- Actions:
+  - Updated `build_case_snapshot()`, `current_objective()`, `legal_context()`, `legal_pressure_level()`, `resolved_points()`, and `_known_case_points()` to accept the current `agent_text` turn as an override instead of relying only on persisted `last_agent_msg`.
+  - Updated `plan_next_action()` and `_critic_pass()` to pass the current operator message into the snapshot/objective layer before the message is formally recorded in session memory.
+  - Replayed the Lenovo `4650132646` scenario where the saved state ended on a polite closing but the next incoming turn was policy text, and confirmed the planner now targets `pending approval + deadline` instead of inheriting the stale closing objective.
+- Result:
+  - Planner goals, legal pressure, resolved-point detection, and critic context now stay aligned with the live operator turn being answered, even when session memory still contains the previous message.
+- Issues/Notes:
+  - This closes the remaining local planner-state mismatch found during post-fix review; the next live operator run is still the right final validation for production behavior.
+
+## 2026-03-14
+- Scope: Deadline-aware follow-up behavior for resumed refund cases.
+- Actions:
+  - Added due-date calculation in `bot.py` for `hours`, `business days`, and `day ranges`, using the saved `follow_up_anchor_at` plus the merchant's promised wait window.
+  - Added follow-up-aware resume opening logic so a resumed case with an existing `case ID` now opens as a case follow-up instead of restarting the refund dispute from scratch.
+  - Taught the bot to distinguish between:
+    - follow-up before the promised deadline expires, and
+    - follow-up after the promised deadline has passed.
+  - Added refund-status-specific asks for cases where Lenovo already said the refund request was opened and that Lenovo/UPS would investigate before refunding the original payment method.
+- Result:
+  - On Lenovo case `4650132646`, the bot now opens as a proper follow-up on `CR000085559` and, after the `5-7 business days` window passes, asks whether the refund was completed and what exact completion date remains if it was not.
+- Issues/Notes:
+  - This makes the bot materially more autonomous for wait-window follow-ups, but an actual scheduler/automation would still be needed if the system should initiate the follow-up without any human launching the bot.
+
+## 2026-03-14
+- Scope: One-block intake for resumed cases from the browser UI.
+- Actions:
+  - Extended `web_ui.py` intake parsing so a single pasted block can now extract:
+    - `case ID`
+    - promised wait window such as `48 hours` or `5-7 business days`
+    - whether the user says that the promised time has already passed
+  - Added Russian wait-window parsing such as `48 часов` and `5-7 рабочих дней` in the browser intake path.
+  - Added startup seeding in `bot.py` so `resume_case_id`, `resume_follow_up_deadline`, and `resume_wait_expired` from the UI become real session state before the first message is generated.
+  - Adjusted resumed opening messages so overdue follow-ups now ask for current case status, the remaining blocker, and the written completion deadline instead of restarting the dispute or asking for unrelated basics.
+- Result:
+  - A raw intake block like the `Luna_Ca / 4649779458 / C004094813 / 48 часов / время уже вышло` example now launches directly into a proper overdue follow-up case flow without manual post-launch fixing.
+- Issues/Notes:
+  - The parser is still heuristic, so labeled lines remain the most reliable format, but the resumed-case path is now materially stronger for mixed Russian/English operator notes.

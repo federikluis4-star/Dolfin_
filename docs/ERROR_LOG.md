@@ -107,3 +107,75 @@ Document every meaningful runtime failure and mitigation.
   - Added persistent case memory and customer transcript sync so attach-mode can resume with the latest known case state and manual user messages.
 - Status:
   - Fixed in code; pending clean live revalidation on the next operator exchange.
+
+## 2026-03-11 — Scripted Tone And Wrong Case IDs In Operator Replies
+- Symptom:
+  - Some replies still sounded like a scripted case manager instead of a live customer, using phrases such as `I am assisting with a case`, generic filler openings, or overly broad case restatements.
+  - Fallback replies could also reuse a hardcoded legacy case ID in unrelated chats.
+- Cause:
+  - Prompting and sanitization enforced first-person wording, but did not yet strip meta phrasing, filler openers, duplicated sentences, or wrong case-ID reuse.
+  - Intent handling also treated some chat-closure warnings and data-request turns too generically.
+- Mitigation:
+  - Tightened the generation and critic prompts around direct live-chat tone.
+  - Added reply polishing to normalize case IDs, remove scripted/meta phrasing, and trim filler before sending.
+  - Added explicit intent handling for chat-closure warnings and direct field requests so replies answer the latest operator point first.
+- Status:
+  - Fixed in code; locally spot-checked and pending clean live-chat revalidation.
+
+## 2026-03-11 — Stale Case Memory And Over-Broad Field Detection Caused Templated Repeats
+- Symptom:
+  - Reopened Lenovo chats could lose the active `CR...` case ID, escalation owner, and other already-resolved facts even though they were present in the saved transcript.
+  - The bot then kept re-asking for case ID, owner, or policy text and looked more like a template than a human.
+  - Operator messages that merely mentioned internal email workflows could incorrectly trigger replies like `The email on the order is ...`.
+  - Housekeeping turns such as hold requests or polite closings could still fall back to a generic DOA/RNR pressure bundle instead of a short human reply.
+- Cause:
+  - Session startup trusted stale `case_memory` snapshots more than the full transcript, and the escalation-owner heuristic was accidentally neutralized by unrelated `same resolution` wording later in the chat.
+  - Field-request detection treated some generic `email` mentions too broadly.
+  - A few narrow operator intents were still routed through generic fallback logic.
+- Mitigation:
+  - Rebuilt derived case state from the full saved transcript on load and persisted the repaired memory back to disk.
+  - Fixed escalation-owner detection and shifted `next_best_asks()` toward the missing approval step and approval deadline once case ID/owner/policy were already known.
+  - Added deterministic short replies for service-turn intents and moved polite-closing handling ahead of generic case fallbacks.
+  - Tightened explicit field-request matching so only real customer-data requests trigger account-detail replies.
+- Status:
+  - Fixed in code; syntax-checked and replayed locally against Lenovo case `4650132646`.
+
+## 2026-03-14 — Planner Snapshot Could Lag One Operator Turn Behind
+- Symptom:
+  - During reply planning, the outgoing message could be generated from the current operator text, but the embedded case snapshot and `goal` field could still reflect the previous operator turn.
+  - In practice this showed up on Lenovo case `4650132646`: after a saved polite-closing turn, a new policy-text message still produced a stale closing-oriented planner goal.
+- Cause:
+  - `plan_next_action()` and `_critic_pass()` built their case snapshot from persisted `last_agent_msg` before the current `agent_text` had been fully recorded in session memory.
+- Mitigation:
+  - Added current-turn overrides to the snapshot/objective layer so `build_case_snapshot()`, `current_objective()`, `legal_context()`, `legal_pressure_level()`, `resolved_points()`, and `_known_case_points()` can reason from the active `agent_text` immediately.
+  - Updated planner and critic calls to pass the current operator message through that override path.
+- Status:
+  - Fixed in code; syntax-checked and replayed locally on the Lenovo transcript regression case.
+
+## 2026-03-14 — Resumed Cases Restarted The Dispute Instead Of Following Up By Deadline
+- Symptom:
+  - When reopening a case that already had a `case ID` and a merchant-provided wait window like `24-48 business hours` or `5-7 business days`, the bot could still open the next chat as if it were a brand-new refund dispute.
+  - Even after Lenovo said a refund request was opened and a `5-7 business days` refund window applied, the bot did not know by itself how to switch to a stronger overdue follow-up once that window passed.
+- Cause:
+  - Resume detection knew that a prior case existed, but the first-turn message did not use due-date logic and did not distinguish `still waiting within the window` from `the promised window has passed`.
+  - Older `approval pending` asks could also outrank newer `refund requested / UPS investigation` facts from the latest merchant update.
+- Mitigation:
+  - Added due-date calculation for `hours`, `business days`, and day ranges using `follow_up_anchor_at`.
+  - Switched resumed first-turn behavior to a dedicated case follow-up opening keyed off the saved `case ID`, wait window, and transcript context.
+  - Added refund-status-specific follow-up asks so, after a promised refund window passes, the bot now asks whether the refund was completed and what exact completion date remains if it was not.
+- Status:
+  - Fixed in code; locally replayed on Lenovo case `4650132646` for both in-window and overdue follow-up scenarios.
+
+## 2026-03-14 — One-Block Intake Did Not Promote Resume Metadata Into Real Bot State
+- Symptom:
+  - A new case pasted into the browser UI could include a prior `case ID`, a promised wait window, and even a note that the promised time had already passed, but the launched bot still treated it too much like a fresh case.
+  - Russian phrases such as `48 часов` were not reliably recognized as a real follow-up deadline.
+- Cause:
+  - The UI intake parser mainly extracted customer/order fields and left resume metadata inside free-form `details`.
+  - Startup config did not seed those resume fields into `CopilotSession` before the first outbound message.
+- Mitigation:
+  - Extended the browser intake parser to extract `resume_case_id`, `resume_follow_up_deadline`, and `resume_wait_expired`.
+  - Added mixed Russian/English wait-window parsing for hours, days, and business days.
+  - Added session seeding so the bot receives that metadata as real state before generating the first message.
+- Status:
+  - Fixed in code; verified locally on the `Luna_Ca / 4649779458 / C004094813 / 48 часов / время уже вышло` intake example.
