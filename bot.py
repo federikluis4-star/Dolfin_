@@ -502,10 +502,10 @@ def extract_profile_id_from_logs(profile_name):
         # ... profile_name:'Luna_CA' ... browser_profile_id:456016554 ...
         # ... profile_name:'Katrin_NJ' ... browserProfileId:597251528 ...
         patterns = [
-            re.compile(rf"profile_name:'{escaped}'.*?browser_profile_id:(\d+)"),
-            re.compile(rf"profile_name:'{escaped}'.*?browserProfileId:(\d+)"),
-            re.compile(rf"name:'{escaped}'.*?browserProfileId:(\d+)"),
-            re.compile(rf"name:'{escaped}'.*?browser_profile_id:(\d+)"),
+            re.compile(rf"profile_name:'{escaped}'.*?browser_profile_id:(\d+)", flags=re.I),
+            re.compile(rf"profile_name:'{escaped}'.*?browserProfileId:(\d+)", flags=re.I),
+            re.compile(rf"name:'{escaped}'.*?browserProfileId:(\d+)", flags=re.I),
+            re.compile(rf"name:'{escaped}'.*?browser_profile_id:(\d+)", flags=re.I),
         ]
         # Берём больше файлов, т.к. нужный профиль мог запускаться не сегодня.
         candidates = sorted(logs_dir.glob("*.log"), key=lambda p: p.stat().st_mtime, reverse=True)[:40]
@@ -6057,25 +6057,31 @@ async def main():
     run_config = load_run_config()
     if run_config:
         print("🗂️  Загружен конфиг запуска из интерфейса.")
+    ui_managed = bool((os.getenv(UI_SESSION_ENV, "") or "").strip())
+    if ui_managed:
+        print("🧭 UI-режим: интерактивные CLI-вопросы отключены.")
 
     global OPENAI_API_KEY, OPENAI_MODEL, DOLPHIN_SESSION_TOKEN, DOLPHIN_CLOUD_API_KEY
     if not OPENAI_API_KEY:
-        key = run_cfg_str(run_config, "openai_api_key") or ask("OpenAI API Key (sk-...)")
+        key = run_cfg_str(run_config, "openai_api_key") or ("" if ui_managed else ask("OpenAI API Key (sk-...)"))
+        if not key:
+            print("❌ OPENAI_API_KEY не задан. Для запуска из UI укажи его в .env или окружении.")
+            sys.exit(1)
         os.environ["OPENAI_API_KEY"] = key
         OPENAI_API_KEY = key
 
     if not OPENAI_MODEL:
-        model = run_cfg_str(run_config, "openai_model", "gpt-4.1-mini") or ask("OpenAI model", "gpt-4.1-mini")
+        model = run_cfg_str(run_config, "openai_model", "gpt-4.1-mini") or ("gpt-4.1-mini" if ui_managed else ask("OpenAI model", "gpt-4.1-mini"))
         OPENAI_MODEL = model
 
     if not DOLPHIN_SESSION_TOKEN:
-        token = run_cfg_str(run_config, "dolphin_session_token") if run_cfg_has(run_config, "dolphin_session_token") else ask("Dolphin Session Token (если требуется, иначе Enter)", "")
+        token = run_cfg_str(run_config, "dolphin_session_token") if run_cfg_has(run_config, "dolphin_session_token") else ("" if ui_managed else ask("Dolphin Session Token (если требуется, иначе Enter)", ""))
         if token:
             os.environ["DOLPHIN_SESSION_TOKEN"] = token
             DOLPHIN_SESSION_TOKEN = token
 
     if not DOLPHIN_CLOUD_API_KEY:
-        cloud_key = run_cfg_str(run_config, "dolphin_cloud_api_key") if run_cfg_has(run_config, "dolphin_cloud_api_key") else ask("Dolphin{cloud} API-ключ (если есть, иначе Enter)", "")
+        cloud_key = run_cfg_str(run_config, "dolphin_cloud_api_key") if run_cfg_has(run_config, "dolphin_cloud_api_key") else ("" if ui_managed else ask("Dolphin{cloud} API-ключ (если есть, иначе Enter)", ""))
         if cloud_key:
             os.environ["DOLPHIN_CLOUD_API_KEY"] = cloud_key
             DOLPHIN_CLOUD_API_KEY = cloud_key
@@ -6083,11 +6089,11 @@ async def main():
     # ── Ввод имени профиля ──────────────────────────────────────────────────
     print()
     configured_autopilot = run_cfg_bool(run_config, "autopilot")
-    autopilot = configured_autopilot if configured_autopilot is not None else ask("Режим автопилота (минимум вопросов)? [Y/n]", "y").lower() != "n"
+    autopilot = configured_autopilot if configured_autopilot is not None else (True if ui_managed else ask("Режим автопилота (минимум вопросов)? [Y/n]", "y").lower() != "n")
 
-    profile_name = run_cfg_str(run_config, "profile_name") or ask("Введи название профиля Dolphin Anty")
+    profile_name = run_cfg_str(run_config, "profile_name") or ("" if ui_managed else ask("Введи название профиля Dolphin Anty"))
     if not profile_name:
-        print("❌ Название не введено.")
+        print("❌ Название профиля не задано в конфиге запуска.")
         sys.exit(1)
 
     print(f"\n🐬 Ищу и запускаю профиль «{profile_name}»...")
@@ -6165,7 +6171,7 @@ async def main():
         print(f"  🏪 Магазин: {auto_store}  (из имени профиля)")
         store = auto_store
     else:
-        store = "Lenovo.com" if autopilot else ask("Магазин (Amazon / Lenovo.com / Zara.com / другой)", "Lenovo.com")
+        store = "Lenovo.com" if (autopilot or ui_managed) else ask("Магазин (Amazon / Lenovo.com / Zara.com / другой)", "Lenovo.com")
 
     if configured_case_type:
         case_type = configured_case_type.upper()
@@ -6174,7 +6180,7 @@ async def main():
         print(f"  📂 Тип кейса: {auto_case}  (из имени профиля)")
         case_type = auto_case
     else:
-        case_type = ("INR" if autopilot else ask("Тип [INR = не получил товар / RNR = не вернули деньги]", "INR")).upper()
+        case_type = ("INR" if (autopilot or ui_managed) else ask("Тип [INR = не получил товар / RNR = не вернули деньги]", "INR")).upper()
 
     has_configured_customer_data = any([
         configured_order_num,
@@ -6188,7 +6194,7 @@ async def main():
     elif configured_use_block is not None:
         use_block = configured_use_block
     else:
-        use_block = ask("Вставить данные клиента блоком? [Y/n]", "y").lower() != "n"
+        use_block = False if ui_managed else ask("Вставить данные клиента блоком? [Y/n]", "y").lower() != "n"
     block_data = {}
     if use_block:
         raw_block = read_multiline_block("Вставь блок данных (name/order/email/phone)")
@@ -6209,15 +6215,15 @@ async def main():
             "phone": configured_customer_phone,
         }
 
-    order_num = configured_order_num if run_cfg_has(run_config, "order_num") else (block_data.get("order") or ask("Номер заказа (Enter = пропустить)", ""))
-    amount = configured_amount if run_cfg_has(run_config, "amount") else ask("Сумма в $ (Enter = пропустить)", "")
-    details = configured_details if run_cfg_has(run_config, "details") else (ask("Детали проблемы", "") if not autopilot else "")
+    order_num = configured_order_num if run_cfg_has(run_config, "order_num") else (block_data.get("order") or ("" if ui_managed else ask("Номер заказа (Enter = пропустить)", "")))
+    amount = configured_amount if run_cfg_has(run_config, "amount") else ("" if ui_managed else ask("Сумма в $ (Enter = пропустить)", ""))
+    details = configured_details if run_cfg_has(run_config, "details") else ("" if (autopilot or ui_managed) else ask("Детали проблемы", ""))
     details_lower = (details or "").lower()
     if any(k in details_lower for k in ["broken screen", "broken", "defective", "damaged", "replacement", "returned back", "returned to lenovo", "ups label"]):
         case_type = "DOA"
-    customer_name = (configured_customer_name or client_name) if run_cfg_has(run_config, "customer_name") else (block_data.get("name") or ask("Имя клиента для pre-chat (Enter = клиент из профиля)", client_name))
-    customer_email = configured_customer_email if run_cfg_has(run_config, "customer_email") else (block_data.get("email") or ask("Email для pre-chat (Enter = пропустить)", ""))
-    customer_phone = configured_customer_phone if run_cfg_has(run_config, "customer_phone") else (block_data.get("phone") or ask("Phone для pre-chat (Enter = пропустить)", ""))
+    customer_name = (configured_customer_name or client_name) if run_cfg_has(run_config, "customer_name") else (block_data.get("name") or (client_name if ui_managed else ask("Имя клиента для pre-chat (Enter = клиент из профиля)", client_name)))
+    customer_email = configured_customer_email if run_cfg_has(run_config, "customer_email") else (block_data.get("email") or ("" if ui_managed else ask("Email для pre-chat (Enter = пропустить)", "")))
+    customer_phone = configured_customer_phone if run_cfg_has(run_config, "customer_phone") else (block_data.get("phone") or ("" if ui_managed else ask("Phone для pre-chat (Enter = пропустить)", "")))
     if DEFAULT_CUSTOMER_NAME and customer_name == client_name:
         customer_name = DEFAULT_CUSTOMER_NAME
     customer_email = normalize_customer_email(customer_email or DEFAULT_CUSTOMER_EMAIL)
@@ -6226,7 +6232,7 @@ async def main():
     if customer_phone and len(re.sub(r"\D+", "", customer_phone)) < 7:
         customer_phone = ""
     configured_prechat_only = run_cfg_bool(run_config, "prechat_only")
-    prechat_only = configured_prechat_only if configured_prechat_only is not None else ask("Режим pre-chat only (без онлайн-диалога)? [y/N]", "n").lower() == "y"
+    prechat_only = configured_prechat_only if configured_prechat_only is not None else (False if ui_managed else ask("Режим pre-chat only (без онлайн-диалога)? [y/N]", "n").lower() == "y")
 
     if profile_running_without_automation and not cdp_port:
         print("\n❌ Этот профиль уже открыт без automation-порта.")

@@ -444,3 +444,16 @@ Use one entry per significant work block.
   - The problem summary now stays focused on the actual support issue and timeline instead of echoing contact metadata back into the bot prompt.
 - Issues/Notes:
   - Clean labels are still the safest format, but the parser now degrades much more gracefully when the intake text is semi-structured or fully narrative.
+
+## 2026-03-14
+- Scope: Non-interactive UI startup for bot sessions.
+- Actions:
+  - Updated `bot.py` so UI-managed launches no longer fall back to `input()` for optional startup fields such as `Dolphin Session Token`, `Dolphin{cloud} API key`, `autopilot`, `use_block`, and `prechat_only`.
+  - Added safe UI defaults for missing optional values and a fail-fast error for missing `OPENAI_API_KEY` instead of silently hanging on a prompt inside the PTY session.
+  - Kept the existing interactive CLI behavior intact for manual terminal launches.
+  - Fixed Dolphin log fallback matching so profile-name lookup is now case-insensitive and can recover `browserProfileId` from local logs even when the saved profile casing differs from the UI input, such as `Luna_Ca` vs `Luna_CA`.
+- Result:
+  - When the bot is started from the local browser UI, it now either proceeds automatically or exits with a clear error, but it no longer stalls on a hidden CLI prompt that the user cannot see in the chat workflow.
+  - UI launches can now recover more reliably when the Dolphin Local API requires a session token but the local logs still contain the real profile ID.
+- Issues/Notes:
+  - This specifically closes a live regression where a UI-launched session stopped at `Dolphin Session Token (если требуется, иначе Enter)` before any chat message was sent.

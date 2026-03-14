@@ -197,3 +197,17 @@ Document every meaningful runtime failure and mitigation.
   - Added `details` cleanup so extracted profile/order/contact/`Case ID` metadata is removed from the support-issue summary while preserving the actual problem narrative and wait-window context.
 - Status:
   - Fixed in code; syntax-checked and locally replayed against semi-structured and free-form Russian intake examples.
+
+## 2026-03-14 — UI-Launched Bot Session Could Stall On Hidden CLI Prompts
+- Symptom:
+  - A bot session started from the local browser UI could appear to be running, but no messages were sent and no live transcript was created.
+  - In the runtime PTY buffer, the process was blocked on `Dolphin Session Token (если требуется, иначе Enter):`, which the user could not answer from the normal UI flow.
+- Cause:
+  - `bot.py` still used CLI `input()` fallbacks for several optional startup fields whenever they were absent from `run_config`.
+  - UI-launched sessions are non-interactive from the user's point of view, so those prompts effectively deadlocked the session before the first message.
+- Mitigation:
+  - Added explicit UI-managed startup behavior that disables interactive fallback prompts for optional fields and uses safe defaults instead.
+  - Added a fail-fast error for missing `OPENAI_API_KEY` in UI mode, so configuration issues surface clearly instead of hanging.
+  - Fixed the local Dolphin log fallback to match profile names case-insensitively, so profiles like `Luna_Ca` can still recover `browserProfileId` from log entries stored as `Luna_CA`.
+- Status:
+  - Fixed in code; detected from a live stalled UI session and verified locally after the patch.
