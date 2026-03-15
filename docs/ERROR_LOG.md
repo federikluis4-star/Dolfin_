@@ -270,3 +270,14 @@ Document every meaningful runtime failure and mitigation.
   - The new response now says, in effect, `That's fine. When you finish reviewing, tell me what exact step you are checking, what is still pending, and the next update deadline.`
 - Status:
   - Fixed in code; replayed locally in the offline dialogue test.
+
+## 2026-03-15 — Dialogue Regressions Needed A Repeatable Offline Safety Net
+- Symptom:
+  - Recent dialogue fixes were being validated mostly through ad-hoc live chats and one-off local replays, which made it too easy for an older template-like behavior to slip back in later.
+- Cause:
+  - The project had no dedicated automated regression file for the exact operator-message patterns that had already caused visible conversational failures.
+- Mitigation:
+  - Added `tests/test_dialogue_regressions.py` with focused `unittest` coverage for handoff greetings, `let me review` replies, drop-off discrepancy claims, customer-side case ID persistence, and true closing messages.
+  - Verified the suite locally with `python3 -m unittest tests/test_dialogue_regressions.py`.
+- Status:
+  - Fixed in code; regression suite passes locally.

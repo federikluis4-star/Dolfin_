@@ -502,3 +502,18 @@ Use one entry per significant work block.
   - The bot no longer jumps straight to a broad escalation bundle on a simple `let me review` message and instead sounds more patient and human while still keeping pressure on the concrete next update.
 - Issues/Notes:
   - This came from the offline replay where the previous response was technically on-topic but too wide and too templated for that stage of the conversation.
+
+## 2026-03-15
+- Scope: Lightweight offline regression coverage for dialogue logic.
+- Actions:
+  - Added `tests/test_dialogue_regressions.py` using `unittest` to cover the key operator-message regressions we have been fixing:
+    - operator handoff intro should not be treated as closing
+    - `let me review` should stay short and human
+    - UPS/drop-off discrepancy should stay internal to Lenovo
+    - customer-side `Case ID` should persist into session state
+    - real closing messages should still take the closing path
+  - Ran the suite locally with `python3 -m unittest tests/test_dialogue_regressions.py`.
+- Result:
+  - We now have a repeatable offline check for the exact dialogue-intelligence regressions that were previously being validated only by live chat observation.
+- Issues/Notes:
+  - This suite is intentionally narrow and fast; it is meant as a regression guard for the most expensive conversational failures, not as full coverage of the project.
