@@ -14,9 +14,11 @@ import time
 import re
 import random
 import difflib
+import subprocess
+from collections import Counter
 from pathlib import Path
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from playwright.async_api import async_playwright
 
 # ─── НАСТРОЙКИ ───────────────────────────────────────────────────────────────
@@ -49,6 +51,9 @@ def load_env_file(env_path=".env"):
 load_env_file()
 
 DOLPHIN_API = "http://localhost:3001/v1.0"   # Dolphin Anty Local API (стандартный порт)
+RUN_CONFIG_ENV = "SUPPORT_COPILOT_RUN_CONFIG_JSON"
+UI_SESSION_ENV = "SUPPORT_COPILOT_UI_SESSION_ID"
+UI_COMMAND_QUEUE_ENV = "SUPPORT_COPILOT_UI_COMMAND_QUEUE_PATH"
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
@@ -60,6 +65,9 @@ DEFAULT_CUSTOMER_PHONE = os.getenv("DEFAULT_CUSTOMER_PHONE", "")
 DEFAULT_ORDER_NUM = os.getenv("DEFAULT_ORDER_NUM", "")
 REVIEW_TRACE_PATH = str(resolve_project_path(os.getenv("REVIEW_TRACE_PATH", "logs/live_chat_review.jsonl")))
 CASE_MEMORY_DIR = str(resolve_project_path(os.getenv("CASE_MEMORY_DIR", "logs/case_memory")))
+CASE_TRANSCRIPT_DIR = str(resolve_project_path(os.getenv("CASE_TRANSCRIPT_DIR", "logs/case_transcripts")))
+POST_CHAT_AUDIT_DIR = str(resolve_project_path(os.getenv("POST_CHAT_AUDIT_DIR", "logs/post_chat_audits")))
+UI_COMMAND_QUEUE_PATH = str(resolve_project_path(os.getenv("UI_COMMAND_QUEUE_PATH", "logs/ui_runtime_commands.jsonl")))
 LENOVO_CHAT_URL = os.getenv(
     "LENOVO_CHAT_URL",
     "https://www.lenovo.com/us/vipmembers/ticketsatwork/en/contact/order-support/",
@@ -78,6 +86,46 @@ _ALLOW_PROFILE_RESTART_RAW = os.getenv("ALLOW_PROFILE_RESTART", "0") == "1"
 STRICT_KEEP_PROFILE = os.getenv("STRICT_KEEP_PROFILE", "1") != "0"
 ALLOW_PROFILE_RESTART = _ALLOW_PROFILE_RESTART_RAW and (not STRICT_KEEP_PROFILE)
 
+
+def load_run_config():
+    raw = (os.getenv(RUN_CONFIG_ENV, "") or "").strip()
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def run_cfg_has(config, key):
+    return isinstance(config, dict) and key in config
+
+
+def run_cfg_str(config, key, default=""):
+    if not run_cfg_has(config, key):
+        return default
+    value = config.get(key)
+    if value is None:
+        return default
+    return str(value).strip()
+
+
+def run_cfg_bool(config, key):
+    if not run_cfg_has(config, key):
+        return None
+    value = config.get(key)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    lowered = str(value).strip().lower()
+    if lowered in {"1", "true", "yes", "y", "on"}:
+        return True
+    if lowered in {"0", "false", "no", "n", "off", ""}:
+        return False
+    return None
+
 SYSTEM_PROMPT = """You are an elite US consumer-rights negotiation copilot writing live support-chat messages as the customer.
 
 PRIMARY GOAL:
@@ -93,9 +141,12 @@ OUTPUT RULES:
 - End with one clear requested action and timeline.
 - Write to the support agent, not to the customer.
 - Write in first person singular from the account holder's point of view: use "I", "my", and "me".
+- Sound like a real customer in a live support chat, not a lawyer, case manager, or outsourced assistant.
 - Never describe the case in third person as "the customer", "the buyer", or similar.
+- Never use meta phrasing such as "I am assisting with a case", "I am reaching out regarding", or similar.
 - Never greet or address the customer by name.
 - Never ask the customer to choose a remedy; ask the support agent to confirm the available resolution for me.
+- Do not start with filler like "Hello" or "Thank you for your message" unless it directly helps the reply.
 
 QUALITY RULES:
 - Write in natural, grammatical US English.
@@ -104,9 +155,15 @@ QUALITY RULES:
 - Use simple business-chat language that sounds like a competent human representative.
 - Use only facts provided in the case/chat history. Do not invent facts, policies, or evidence.
 - Do not claim to be a lawyer; write as the customer or account holder.
+- Answer the operator's latest point in the first sentence.
+- If the operator asks for name, email, phone, or order number, provide that exact data in the first sentence before asking for anything else.
 - Start cooperative, then become firm if delayed/denied.
 - Keep pressure legal and realistic (FCBA/FTC/chargeback) only when needed.
 - If agent asks for missing data, provide concise compliance and restate the resolution request.
+- Do not repeat the full case history when one or two facts are enough to answer the latest point.
+- Avoid "kindly", legal-sounding boilerplate, or stacked demands when one specific ask is enough.
+- Use legally grounded pressure when the facts support it, but keep it short and practical.
+- Never bluff, invent laws, or state conditional rights as unconditional facts.
 
 NEGOTIATION PLAYBOOK:
 1) Align + summarize issue + ask for specific remedy.
@@ -132,8 +189,23 @@ Your job:
 - Avoid repeating the same demand unless the operator ignored it and the message explicitly says that.
 - If the operator asks a narrow question or makes a specific claim, answer that exact point first, then push the case forward.
 - The first sentence must directly address the operator's latest claim or request.
+- Sound like a capable customer in a real-time chat, not a case manager, legal notice, or template.
+- Do not use greetings, gratitude filler, or scene-setting unless it responds to something concrete in the operator's last message.
+- Do not use meta phrases like "I am assisting with a case", "I am reaching out regarding", "the customer", "kindly", or "we need".
 - If the operator denies receipt despite delivery evidence, say that the tracking shows delivery and ask them to verify the discrepancy.
 - If the operator tells the customer to repeat a return that was already delivered, reject that burden shift and ask Lenovo to verify internally instead.
+- If the operator asks for contact data or order details, answer with the exact data in sentence one, then ask for the next step.
+- If the operator says they are closing the chat or did not hear back, say I am still here and ask for the next concrete action before the chat closes.
+- If a case ID exists in the case context, reuse that exact case ID and never invent a different one.
+- If this is the first message in a resumed case and the case context already has a case ID, wait window, or prior transcript, open as a follow-up on the existing case instead of restarting the dispute from scratch.
+- Use the `legal_context` from the case snapshot when deciding how hard to press.
+- Use `resolved_points` and `next_best_asks` from the case snapshot.
+- Do not keep asking for a case ID, escalation owner, or policy text after the operator already provided it, unless you are pointing out that it was incomplete or contradictory.
+- When the operator gives a partial answer, narrow the next ask to the single missing point instead of repeating the full escalation bundle.
+- For an online order or replacement that remains unshipped after delay, you may say I am not agreeing to an open-ended delay and ask for cancellation plus a prompt refund.
+- Only mention FCBA, billing-dispute rights, Regulation Z, or a card-issuer dispute conditionally unless the case context confirms a credit-card purchase.
+- If you mention a legal or regulatory basis, keep it to one short clause and tie it directly to the facts.
+- Prefer written basis, escalation owner, case ID, deadline, prompt refund, and billing-dispute preservation over long legal lectures.
 - If the chat is not truly ready for a live agent message, choose wait.
 - If the agent asks for data already known in the case, answer directly and concisely.
 - If the agent is vague or stalling, ask for a concrete action, case ID, escalation owner, or timeline.
@@ -178,6 +250,13 @@ Goal:
 - Reject replies whose first sentence does not directly answer the operator's latest claim.
 - Reject replies that accept an unreasonable burden shift back to the customer when the merchant should verify its own warehouse/return records.
 - Reject replies written in third person about the customer. The reply must be in first person singular.
+- Reject replies with filler openings like generic greetings or "Thank you for your message" when they delay the actual answer.
+- Reject meta phrasing such as "I am assisting with a case", "the customer", "we need", or an invented/wrong case ID.
+- Reject replies that sound like a scripted legal notice instead of a live customer message.
+- Reject replies that restate the whole case when a narrow answer would be stronger.
+- Reject replies that overclaim legal rights, cite the wrong legal basis for the facts, or present conditional card-dispute rights as unconditional.
+- Reject replies that threaten regulators, lawsuits, or criminal consequences when the case snapshot does not support that escalation.
+- Reject replies that keep asking for already-resolved points when the case snapshot shows a narrower missing point to pursue instead.
 
 JSON schema:
 {
@@ -191,6 +270,46 @@ Rules:
 - `fix` must be empty when approved is true.
 - `fix` must be a short improved replacement when approved is false.
 - Never write from the merchant's point of view.
+"""
+
+POST_CHAT_AUDIT_PROMPT = """You are reviewing a completed support-chat transcript where the customer-side messages were written by a bot.
+
+Return JSON only.
+
+Goal:
+- Judge whether the bot sounded like a real human customer or like a reusable template.
+- Focus on the customer-side messages only.
+- Use the transcript, case snapshot, and heuristic stats together.
+- Be strict about repetitive phrasing, robotic escalation ladders, and fake-lawyer tone.
+- Separate strong legal pressure from bad scripted pressure.
+
+JSON schema:
+{
+  "summary": "string",
+  "verdict": "human_like|mixed|templated",
+  "human_likeness_score": 0.0,
+  "template_risk_score": 0.0,
+  "persuasion_score": 0.0,
+  "legal_grounding_score": 0.0,
+  "strengths": ["string"],
+  "bot_signals": ["string"],
+  "notable_examples": [
+    {
+      "quote": "string",
+      "why": "string"
+    }
+  ],
+  "recommended_fixes": ["string"]
+}
+
+Rules:
+- All four scores must be on a 0-10 scale.
+- Quote only short excerpts.
+- Call out specific repeated openers, repeated asks, or sentence shapes when they hurt realism.
+- Reward direct, context-aware answers that feel tailored to the operator's last point.
+- Penalize generic escalation patterns that would be obvious to a human operator.
+- Penalize legal overclaiming, but reward concise fact-based legal leverage.
+- Recommended fixes must be implementation-focused, not generic writing advice.
 """
 
 # ─── ПАРСИНГ ИМЕНИ ПРОФИЛЯ ───────────────────────────────────────────────────
@@ -384,10 +503,10 @@ def extract_profile_id_from_logs(profile_name):
         # ... profile_name:'Luna_CA' ... browser_profile_id:456016554 ...
         # ... profile_name:'Katrin_NJ' ... browserProfileId:597251528 ...
         patterns = [
-            re.compile(rf"profile_name:'{escaped}'.*?browser_profile_id:(\d+)"),
-            re.compile(rf"profile_name:'{escaped}'.*?browserProfileId:(\d+)"),
-            re.compile(rf"name:'{escaped}'.*?browserProfileId:(\d+)"),
-            re.compile(rf"name:'{escaped}'.*?browser_profile_id:(\d+)"),
+            re.compile(rf"profile_name:'{escaped}'.*?browser_profile_id:(\d+)", flags=re.I),
+            re.compile(rf"profile_name:'{escaped}'.*?browserProfileId:(\d+)", flags=re.I),
+            re.compile(rf"name:'{escaped}'.*?browserProfileId:(\d+)", flags=re.I),
+            re.compile(rf"name:'{escaped}'.*?browser_profile_id:(\d+)", flags=re.I),
         ]
         # Берём больше файлов, т.к. нужный профиль мог запускаться не сегодня.
         candidates = sorted(logs_dir.glob("*.log"), key=lambda p: p.stat().st_mtime, reverse=True)[:40]
@@ -523,11 +642,22 @@ class CopilotSession:
         self.review_trace_path = REVIEW_TRACE_PATH
         self.case_memory_dir = CASE_MEMORY_DIR
         self.case_memory_path = self._build_case_memory_path()
+        self.case_transcript_dir = CASE_TRANSCRIPT_DIR
+        self.case_transcript_path = self._build_case_transcript_path()
+        self.post_chat_audit_dir = POST_CHAT_AUDIT_DIR
+        self.case_audit_path = self._build_case_audit_path()
+        self.ui_session_id = (os.getenv(UI_SESSION_ENV, "") or "").strip()
+        self.ui_command_queue_path = str(resolve_project_path(os.getenv(UI_COMMAND_QUEUE_ENV, UI_COMMAND_QUEUE_PATH)))
+        self.ui_command_offset = 0
         self.last_critic_verdict = {}
         self.latest_case_id = ""
         self.latest_case_outcome = ""
         self.follow_up_deadline = ""
+        self.follow_up_anchor_at = ""
+        self.last_event_at = ""
         self.last_saved_at = ""
+        self.operator_notes = []
+        self.pending_requested_field = ""
         self._load_case_memory()
 
     def case_name(self):
@@ -552,13 +682,422 @@ class CopilotSession:
             )
         return "the returned merchandise was delivered back to the merchant but the refund is still outstanding"
 
+    def _strip_customer_echo(self, text):
+        t = (text or "").strip()
+        if not t:
+            return ""
+        if t.lower().startswith("your message"):
+            remainder = re.sub(r"^your message[\s:,-]*", "", t, flags=re.I).strip()
+            return remainder or t
+        return t
+
+    def _operator_text(self, text):
+        t = (text or "").strip()
+        if not t:
+            return ""
+        t = re.sub(r"\b(?:lenovo|advisor message)\b", " ", t, flags=re.I)
+        t = re.sub(r"\s+", " ", t).strip()
+        return t
+
+    def _case_id_pattern(self):
+        return r"\bC[A-Z]?\d{6,12}\b"
+
+    def _contains_case_id(self, text):
+        return bool(re.search(self._case_id_pattern(), text or "", flags=re.I))
+
+    def _extract_case_ids(self, text):
+        return [item.upper() for item in re.findall(self._case_id_pattern(), text or "", flags=re.I)]
+
+    def _explicit_field_request(self, text, field_name):
+        t = self._operator_text(text).lower()
+        if not t:
+            return False
+        blocked_fragments = {
+            "email": [
+                "unable to send emails directly",
+                "sent an email",
+                "emailed the team",
+                "reach out to the relevant team via email",
+                "provide you with a transcript",
+                "chat transcript",
+                "order email is",
+                "your order email",
+                "email the team",
+            ],
+            "phone": [
+                "phone support",
+                "call us",
+                "contact phone",
+            ],
+            "order": [
+                "order status",
+                "existing orders",
+            ],
+            "name": [],
+        }
+        if any(fragment in t for fragment in blocked_fragments.get(field_name, [])):
+            return False
+        patterns = {
+            "email": [
+                r"\b(?:please|kindly|can you|could you|would you|may i|i need you to)\b[^.?!]{0,40}\b(?:provide|confirm|share|enter|verify|give)\b[^.?!]{0,40}\b(?:email|e-mail|email address)\b",
+                r"\bwhat(?:'s| is)\s+your\s+(?:email|e-mail|email address)\b",
+                r"\b(?:email|e-mail|email address)\b[^.?!]{0,20}\?$",
+                r"\bemail on the order\b[^.?!]{0,25}\b(?:please|can you|could you|share|confirm|provide)\b",
+            ],
+            "phone": [
+                r"\b(?:please|kindly|can you|could you|would you|may i|i need you to)\b[^.?!]{0,40}\b(?:provide|confirm|share|enter|verify|give)\b[^.?!]{0,40}\b(?:phone|phone number|contact number)\b",
+                r"\bwhat(?:'s| is)\s+your\s+(?:phone|phone number|contact number)\b",
+                r"\b(?:phone|phone number|contact number)\b[^.?!]{0,20}\?$",
+            ],
+            "order": [
+                r"\b(?:please|kindly|can you|could you|would you|may i|i need you to)\b[^.?!]{0,40}\b(?:provide|confirm|share|enter|verify|give)\b[^.?!]{0,40}\border(?: number| no\.?| #)?\b",
+                r"\bwhat(?:'s| is)\s+your\s+order(?: number| no\.?| #)?\b",
+                r"\border(?: number| no\.?| #)?\b[^.?!]{0,20}\?$",
+            ],
+            "name": [
+                r"\b(?:please|kindly|can you|could you|would you|may i|i need you to)\b[^.?!]{0,40}\b(?:provide|confirm|share|enter|verify|give)\b[^.?!]{0,40}\bname\b",
+                r"\bwhat(?:'s| is)\s+your\s+name\b",
+                r"\bname on the order\b",
+            ],
+        }
+        return any(re.search(pattern, t, flags=re.I) for pattern in patterns.get(field_name, []))
+
+    def _known_case_points(self, agent_text=""):
+        claims_text = " ".join(self.operator_claims).lower()
+        last_agent = (agent_text or self.last_agent_msg or "").lower()
+        text = f"{claims_text} {last_agent}".strip()
+        return {
+            "case_id_confirmed": bool(self.latest_case_id) or self._contains_case_id(text),
+            "escalation_owner_known": any(x in text for x in ["case manager", "escalation owner", "na csat"]),
+            "policy_text_provided": any(x in text for x in ["written policy:", "exact policy:", "refunds are processed after concession and case review is complete"]),
+            "no_policy_basis_admitted": "there is no return policy that justifies withholding your refund" in text,
+            "approval_dependency_stated": any(x in text for x in ["once approved", "after approval", "under review", "concession request", "case review is complete"]),
+            "no_firm_deadline": any(x in text for x in ["do not have a firm deadline", "no firm deadline", "firm refund date depends"]),
+            "callback_window_given": bool((self.follow_up_deadline or "").strip()) or any(x in text for x in ["24-48 business hours", "24 to 48 business hours", "reach out to us again", "contact us again"]),
+            "returns_team_confirmed": "returns team" in text,
+            "supervisor_same_resolution": "same resolution" in text,
+            "internal_email_update_only": any(x in text for x in ["emailed the team", "sent an email to our team", "reach out to the relevant team via email"]),
+            "refund_requested": any(x in text for x in ["successfully requested a refund", "refund has been requested", "requested a refund for your order"]),
+            "ups_investigation_pending": any(x in text for x in ["lenovo and ups will investigate", "ups will investigate", "lenovo will investigate", "investigate the issue"]),
+            "payment_method_refund_confirmed": any(x in text for x in ["same payment method", "original payment method", "payment method you used"]),
+        }
+
+    def resolved_points(self, agent_text=""):
+        points = self._known_case_points(agent_text=agent_text)
+        resolved = []
+        if points["case_id_confirmed"]:
+            resolved.append("case ID already confirmed")
+        if points["escalation_owner_known"]:
+            resolved.append("escalation owner already identified")
+        if points["policy_text_provided"]:
+            resolved.append("operator already provided policy wording")
+        if points["no_policy_basis_admitted"]:
+            resolved.append("operator admitted there is no separate return policy basis for withholding the refund")
+        if points["approval_dependency_stated"]:
+            resolved.append("operator said the refund depends on concession or approval review")
+        if points["callback_window_given"]:
+            resolved.append("operator asked for a 24-48 business hour follow-up window")
+        if points["refund_requested"]:
+            resolved.append("operator said the refund request was already opened")
+        if points["payment_method_refund_confirmed"]:
+            resolved.append("operator confirmed the refund would return to the original payment method")
+        return resolved[:6]
+
+    def next_best_asks(self, agent_text=""):
+        intent = self.infer_agent_intent(agent_text or self.last_agent_msg)
+        points = self._known_case_points(agent_text=agent_text)
+        asks = []
+        if intent == "consumer_type_question":
+            return asks
+        if intent == "acknowledgement_only":
+            asks.append("return with the actual decision or written basis, not only an acknowledgement")
+            return asks
+        if intent == "agent_intro":
+            asks.append("confirm the current status of the case")
+            asks.append("explain exactly what is still pending")
+            asks.append("give the written deadline for completion")
+            return asks
+        if intent == "reviewing_case":
+            asks.append("tell me what exact step you are reviewing")
+            asks.append("confirm what is still pending")
+            asks.append("give the next update deadline before you return")
+            return asks
+        if intent == "information_gathering_delay":
+            asks.append("come back with the actual review result, not only a delay message")
+            asks.append("state whether Lenovo is treating this as a lost return, empty-box, or tampering review")
+            asks.append("give the next concrete update deadline")
+            return asks
+        if intent in {"hold_request", "keepalive"}:
+            asks.append("tell me the exact next step and timeline")
+            return asks
+        if intent == "transcript_offer":
+            asks.append("confirm the escalation owner and next update deadline, not only the transcript")
+            return asks
+        if intent == "case_canceled_ups_redirect":
+            asks.append("confirm the case is reopened or re-escalated instead of redirecting me away from Lenovo")
+            asks.append("state whether Lenovo is treating this as a lost return, carrier misdelivery issue, or tampering review")
+            asks.append("give the written deadline for Lenovo's final refund decision")
+            return asks
+        if intent == "missing_product_after_delivery_claim":
+            asks.append("state whether Lenovo is making an empty-box claim, a tampering claim, or another inspection finding")
+            asks.append("identify the team handling that review")
+            asks.append("give the written deadline for Lenovo's final refund decision")
+            return asks
+        if intent == "dropoff_location_claim":
+            asks.append("state whether Lenovo is treating this as a lost return, a carrier misdelivery issue, or a fraud review")
+            asks.append("explain why Lenovo is withholding the refund when Lenovo's own UPS label and internal carrier review are involved")
+            asks.append("name the team handling this review and give the exact deadline for Lenovo's refund decision")
+            return asks
+        if points["refund_requested"] or points["ups_investigation_pending"]:
+            asks.append("confirm whether the refund has already been completed")
+            asks.append("if the refund is not complete, explain exactly what is still pending with Lenovo or UPS")
+            asks.append("give the exact date when the refund will be completed to the original payment method")
+            deduped = []
+            for ask in asks:
+                if ask not in deduped:
+                    deduped.append(ask)
+            return deduped[:3]
+        if not points["case_id_confirmed"]:
+            asks.append("confirm the case ID")
+        if not points["escalation_owner_known"]:
+            asks.append("name the escalation owner or team that owns the review")
+        if not points["policy_text_provided"] and not points["no_policy_basis_admitted"]:
+            asks.append("quote the exact policy or written basis for why the refund is still pending")
+        if points["no_policy_basis_admitted"]:
+            asks.append("state what exact approval is still pending")
+            asks.append("give the date or deadline for when that approval review will finish")
+        elif points["policy_text_provided"] or points["approval_dependency_stated"]:
+            asks.append("state what exact approval or concession step is still pending")
+            asks.append("give the deadline for when that approval review will finish")
+        elif points["callback_window_given"]:
+            asks.append("confirm who owns the case during the 24-48 business hour follow-up window")
+            asks.append("confirm the next written update deadline")
+        elif not points["approval_dependency_stated"]:
+            asks.append("explain exactly what is still blocking the refund")
+        if points["supervisor_same_resolution"]:
+            asks.append("tell me who has authority to approve the refund if the supervisor cannot change it")
+        if points["internal_email_update_only"]:
+            asks.append("tell me what exactly was requested in the internal escalation and when the next update is due")
+        deduped = []
+        for ask in asks:
+            if ask not in deduped:
+                deduped.append(ask)
+        return deduped[:3]
+
+    def legal_pressure_level(self, agent_text=""):
+        intent = self.infer_agent_intent(agent_text or self.last_agent_msg)
+        if self.message_count >= 3 or intent in {
+            "return_required_claim",
+            "customer_retrieve_and_rereturn",
+            "ups_redirect",
+            "dropoff_location_claim",
+            "case_canceled_ups_redirect",
+            "missing_product_after_delivery_claim",
+            "empty_box_claim",
+            "warehouse_missing_claim",
+            "closure_warning",
+        }:
+            return "high"
+        if intent in {"case_id_provided", "escalation_confirmed", "timeline_statement"} or self.message_count >= 2:
+            return "medium"
+        return "low"
+
+    # Ground legal pressure in official FTC/CFPB consumer-rights concepts without overclaiming applicability.
+    def legal_context(self, agent_text=""):
+        case = (self.case_type or "").upper()
+        pressure = self.legal_pressure_level(agent_text=agent_text)
+        allowed_anchors = [
+            "Ask for the written policy basis, escalation owner, case ID, and a concrete deadline.",
+            "Keep any legal reference short and tied to the facts already in the case snapshot.",
+        ]
+        if case == "INR":
+            allowed_anchors.extend([
+                "For an online order that was not delivered on time, I can refuse an open-ended delay and ask for cancellation plus a prompt refund.",
+                "If this charge was on a credit card, I may preserve billing-dispute rights with the card issuer if the merchant does not resolve the non-delivery.",
+            ])
+        if case in {"RNR", "REFUND", "DOA", "DAMAGED", "DEFECTIVE", "BROKEN"}:
+            allowed_anchors.extend([
+                "If Lenovo already has the return or cannot fulfill the replacement, I can demand the written basis for withholding the refund and a concrete refund timeline.",
+                "If the replacement remains unfulfilled, I do not have to accept an open-ended replacement delay and can ask Lenovo to cancel that path and confirm the refund.",
+            ])
+        if pressure == "high":
+            allowed_anchors.append(
+                "If the operator keeps stalling or denying without basis, I can say that if this purchase was on a credit card I will preserve my billing-dispute rights and need Lenovo's written basis today."
+            )
+        return {
+            "pressure_level": pressure,
+            "allowed_anchors": allowed_anchors[:4],
+            "forbidden_anchors": [
+                "Do not claim to be a lawyer or threaten criminal penalties.",
+                "Do not present card-dispute rights as unconditional unless a credit-card purchase is known.",
+                "Do not cite legal rights that do not fit the facts in the current case.",
+                "Do not threaten regulators or lawsuits unless the dialogue has clearly reached that stage.",
+            ],
+            "preferred_asks": [
+                "written policy basis",
+                "supervisor or returns-team escalation",
+                "case ID",
+                "exact refund or follow-up timeline",
+            ],
+        }
+
+    def active_case_reference(self):
+        return f"case ID {self.latest_case_id}" if self.latest_case_id else "this case"
+
+    def _resume_wait_window_label(self):
+        if (self.follow_up_deadline or "").strip():
+            return self.follow_up_deadline.strip()
+        if self._known_case_points().get("callback_window_given"):
+            return "24-48 business hours"
+        return ""
+
+    def _follow_up_due_status(self):
+        anchor_at = (self.follow_up_anchor_at or self.last_event_at or "").strip()
+        deadline = self._resume_wait_window_label()
+        return self._compute_follow_up_due(anchor_at=anchor_at, deadline=deadline)
+
+    def _follow_up_opening_ask(self, due_passed=False):
+        points = self._known_case_points()
+        if points["refund_requested"] or points["ups_investigation_pending"]:
+            if due_passed:
+                return (
+                    "confirm whether the refund has been completed, and if not, explain exactly what is still pending with Lenovo or UPS and give the exact completion date"
+                )
+            return "confirm the current refund status and the exact date the refund will be completed to the original payment method"
+        if due_passed:
+            return "confirm the current status of this case, explain exactly what is still pending, and give the written deadline for completion"
+        return "confirm the current status of this case and the next update deadline"
+
+    def _should_resume_existing_case(self):
+        if self.latest_case_id:
+            return True
+        if (self.latest_case_outcome or "").strip():
+            return True
+        if (self.follow_up_deadline or "").strip():
+            return True
+        if self._known_case_points().get("callback_window_given"):
+            return True
+        return self.message_count >= 2 or len(self.transcript) >= 4
+
+    def _seed_follow_up_anchor(self, deadline="", wait_expired=False):
+        now = datetime.now(timezone.utc)
+        deadline_text = (deadline or "").strip()
+        if not deadline_text:
+            return self._utc_now_iso()
+        if not wait_expired:
+            return now.isoformat().replace("+00:00", "Z")
+
+        hours_match = re.search(r"(\d+)\s*hours?", deadline_text, flags=re.I)
+        if hours_match:
+            hours = int(hours_match.group(1))
+            anchor = now - timedelta(hours=max(1, hours + 1))
+            return anchor.isoformat().replace("+00:00", "Z")
+
+        business_range_match = re.search(r"(\d+)\s*-\s*(\d+)\s*business\s*days?", deadline_text, flags=re.I)
+        if business_range_match:
+            business_days = int(business_range_match.group(2))
+            anchor = now
+            remaining = business_days + 1
+            while remaining > 0:
+                anchor -= timedelta(days=1)
+                if anchor.weekday() < 5:
+                    remaining -= 1
+            return anchor.isoformat().replace("+00:00", "Z")
+
+        business_days_match = re.search(r"(\d+)\s*business\s*days?", deadline_text, flags=re.I)
+        if business_days_match:
+            business_days = int(business_days_match.group(1))
+            anchor = now
+            remaining = business_days + 1
+            while remaining > 0:
+                anchor -= timedelta(days=1)
+                if anchor.weekday() < 5:
+                    remaining -= 1
+            return anchor.isoformat().replace("+00:00", "Z")
+
+        days_range_match = re.search(r"(\d+)\s*-\s*(\d+)\s*days?", deadline_text, flags=re.I)
+        if days_range_match:
+            days = int(days_range_match.group(2))
+            anchor = now - timedelta(days=max(1, days + 1))
+            return anchor.isoformat().replace("+00:00", "Z")
+
+        days_match = re.search(r"(\d+)\s*days?", deadline_text, flags=re.I)
+        if days_match:
+            days = int(days_match.group(1))
+            anchor = now - timedelta(days=max(1, days + 1))
+            return anchor.isoformat().replace("+00:00", "Z")
+
+        return (now - timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+
+    def seed_resume_context(self, case_id="", follow_up_deadline="", wait_expired=False, latest_agent_message="", latest_case_outcome=""):
+        case_id = (case_id or "").strip().upper()
+        follow_up_deadline = (follow_up_deadline or "").strip()
+        latest_agent_message = (latest_agent_message or "").strip()
+        latest_case_outcome = (latest_case_outcome or "").strip()
+        if case_id:
+            self.latest_case_id = case_id
+            self._append_unique(self.confirmed_facts, f"Case ID {case_id} was already provided before this chat")
+        if follow_up_deadline:
+            self.follow_up_deadline = follow_up_deadline
+            self.follow_up_anchor_at = self._seed_follow_up_anchor(follow_up_deadline, wait_expired=bool(wait_expired))
+            self._append_unique(self.confirmed_facts, f"The merchant previously asked for a {follow_up_deadline} follow-up window")
+            if not latest_case_outcome and case_id:
+                latest_case_outcome = f"The merchant asked for a {follow_up_deadline} follow-up on case {case_id}."
+        if latest_case_outcome:
+            self.latest_case_outcome = latest_case_outcome
+        if latest_agent_message:
+            self.last_agent_msg = latest_agent_message
+            self._append_unique(self.operator_claims, latest_agent_message)
+        self.dialogue_state = self._infer_dialogue_state()
+        self._persist_case_memory()
+
+    def _follow_up_opening_message(self):
+        order = self.order_num or "my order"
+        case_ref = self.active_case_reference()
+        wait_window = self._resume_wait_window_label()
+        _, due_passed = self._follow_up_due_status()
+        ask = self._follow_up_opening_ask(due_passed=due_passed)
+        intro = (
+            f"I am following up on {case_ref} for order {order}."
+            if self.latest_case_id else
+            f"I am following up on my earlier chat about order {order}."
+        )
+        if wait_window:
+            if due_passed:
+                return (
+                    f"{intro} "
+                    f"The {wait_window} window you provided has now passed, and I am following up today. "
+                    f"Please {ask}."
+                )
+            return (
+                f"{intro} "
+                f"I was told to wait {wait_window} for an update. "
+                f"Please {ask}."
+            )
+        return (
+            f"{intro} "
+            "I am checking the status of the existing review. "
+            f"Please {ask}."
+        )
+
+    def _requested_customer_field(self, text):
+        if self._explicit_field_request(text, "email"):
+            return "email"
+        if self._explicit_field_request(text, "phone"):
+            return "phone"
+        if self._explicit_field_request(text, "order"):
+            return "order"
+        if self._explicit_field_request(text, "name"):
+            return "name"
+        return ""
+
     def generate_first_message(self):
         plan = self.plan_next_action(
             agent_text="",
             observation={"chat_ready": True, "first_turn": True},
             first_turn=True,
         )
-        reply = (plan.get("message") or "").strip()
+        reply = self._polish_chat_reply(plan.get("message") or "", first_turn=True)
         if not reply:
             prompt = f"""Start a live support chat with {self.store}.
 Case: {self.case_name()}
@@ -569,21 +1108,22 @@ Write the first message to the support agent.
 Make it polished, grammatical, and natural."""
 
             self.history = [{"role": "user", "content": prompt}]
-            reply = self._call_llm()
+            reply = self._polish_chat_reply(self._call_llm(), first_turn=True)
         self.history.append({"role": "assistant", "content": reply})
-        self.transcript.append({"role": "customer_rep", "content": reply})
-        self.message_count = 1
+        self._append_transcript_entry("customer_rep", reply)
+        self._sync_message_count_from_transcript()
         self.last_sent_msg = reply
         return reply
 
-    def generate_reply(self, agent_text):
-        self.record_agent_message(agent_text)
+    def generate_reply(self, agent_text, already_recorded=False):
+        if not already_recorded:
+            self.record_agent_message(agent_text)
         plan = self.plan_next_action(
             agent_text=agent_text,
             observation={"chat_ready": True, "message_count": self.message_count},
             first_turn=False,
         )
-        reply = (plan.get("message") or "").strip()
+        reply = self._polish_chat_reply(plan.get("message") or "", agent_text=agent_text, first_turn=False)
         if not reply:
             n = self.message_count
             escalation = (
@@ -597,14 +1137,15 @@ Write the next message that maximizes chance of a positive resolution now.
 Preferred outcomes priority: full refund > free replacement > supervisor escalation with case ID and deadline.
 Before answering, silently proofread the message for grammar and clarity."""
             self.history.append({"role": "user", "content": prompt})
-            reply = self._call_llm()
+            reply = self._polish_chat_reply(self._call_llm(), agent_text=agent_text, first_turn=False)
         self.history.append({"role": "assistant", "content": reply})
-        self.transcript.append({"role": "customer_rep", "content": reply})
+        self._append_transcript_entry("customer_rep", reply)
         self.message_count += 1
         self.last_sent_msg = reply
         return reply
 
-    def build_case_snapshot(self):
+    def build_case_snapshot(self, agent_text=""):
+        current_agent_text = agent_text or self.last_agent_msg
         return {
             "store": self.store,
             "case_type": self.case_name(),
@@ -615,10 +1156,13 @@ Before answering, silently proofread the message for grammar and clarity."""
             "customer_email": self.customer_email or "",
             "customer_phone": self.customer_phone or "",
             "message_count": self.message_count,
-            "last_agent_message": self.last_agent_msg or "",
+            "last_agent_message": current_agent_text or "",
             "last_customer_message": self.last_sent_msg or "",
-            "agent_intent": self.infer_agent_intent(self.last_agent_msg),
-            "current_objective": self.current_objective(),
+            "agent_intent": self.infer_agent_intent(current_agent_text),
+            "current_objective": self.current_objective(current_agent_text),
+            "legal_context": self.legal_context(current_agent_text),
+            "resolved_points": self.resolved_points(current_agent_text),
+            "next_best_asks": self.next_best_asks(current_agent_text),
             "dialogue_state": self.dialogue_state,
             "unresolved_demands": self.unresolved_demands[-6:],
             "confirmed_facts": self.confirmed_facts[-8:],
@@ -627,6 +1171,12 @@ Before answering, silently proofread the message for grammar and clarity."""
             "latest_case_id": self.latest_case_id,
             "latest_case_outcome": self.latest_case_outcome,
             "follow_up_deadline": self.follow_up_deadline,
+            "follow_up_due_at": self._follow_up_due_status()[0],
+            "follow_up_due_passed": self._follow_up_due_status()[1],
+            "operator_notes": self.operator_notes[-6:],
+            "pending_requested_field": self.pending_requested_field,
+            "transcript_message_count": len(self.transcript),
+            "conversation_outline": self._conversation_outline(),
         }
 
     def _case_memory_key(self):
@@ -637,39 +1187,751 @@ Before answering, silently proofread the message for grammar and clarity."""
     def _build_case_memory_path(self):
         return str(Path(self.case_memory_dir) / f"{self._case_memory_key()}.json")
 
+    def _build_case_transcript_path(self):
+        return str(Path(self.case_transcript_dir) / f"{self._case_memory_key()}.json")
+
+    def _build_case_audit_path(self):
+        return str(Path(self.post_chat_audit_dir) / f"{self._case_memory_key()}.md")
+
+    def _refresh_case_storage_paths(self, move_existing=False):
+        old_memory_path = Path(self.case_memory_path) if self.case_memory_path else None
+        old_transcript_path = Path(self.case_transcript_path) if self.case_transcript_path else None
+        old_audit_path = Path(self.case_audit_path) if self.case_audit_path else None
+        new_memory_path = Path(self._build_case_memory_path())
+        new_transcript_path = Path(self._build_case_transcript_path())
+        new_audit_path = Path(self._build_case_audit_path())
+        if move_existing:
+            try:
+                if old_memory_path and old_memory_path != new_memory_path and old_memory_path.exists() and not new_memory_path.exists():
+                    new_memory_path.parent.mkdir(parents=True, exist_ok=True)
+                    old_memory_path.rename(new_memory_path)
+            except Exception:
+                pass
+            try:
+                if old_transcript_path and old_transcript_path != new_transcript_path and old_transcript_path.exists() and not new_transcript_path.exists():
+                    new_transcript_path.parent.mkdir(parents=True, exist_ok=True)
+                    old_transcript_path.rename(new_transcript_path)
+            except Exception:
+                pass
+            try:
+                if old_audit_path and old_audit_path != new_audit_path and old_audit_path.exists() and not new_audit_path.exists():
+                    new_audit_path.parent.mkdir(parents=True, exist_ok=True)
+                    old_audit_path.rename(new_audit_path)
+            except Exception:
+                pass
+        self.case_memory_path = str(new_memory_path)
+        self.case_transcript_path = str(new_transcript_path)
+        self.case_audit_path = str(new_audit_path)
+
+    def _utc_now_iso(self):
+        return datetime.utcnow().isoformat(timespec="seconds") + "Z"
+
+    def _parse_iso_dt(self, raw):
+        if not raw:
+            return None
+        try:
+            if raw.endswith("Z"):
+                return datetime.fromisoformat(raw[:-1] + "+00:00")
+            return datetime.fromisoformat(raw)
+        except ValueError:
+            return None
+
+    def _add_business_days(self, start_dt, business_days):
+        current = start_dt
+        remaining = max(0, int(business_days or 0))
+        while remaining > 0:
+            current += timedelta(days=1)
+            if current.weekday() < 5:
+                remaining -= 1
+        return current
+
+    def _compute_follow_up_due(self, anchor_at="", deadline=""):
+        anchor_dt = self._parse_iso_dt(anchor_at)
+        deadline_text = (deadline or "").strip()
+        if not anchor_dt or not deadline_text:
+            return "", False
+
+        russian_business_range = re.search(r"(\d+)\s*-\s*(\d+)\s*рабоч(?:их|ие)?\s*дн", deadline_text, flags=re.I)
+        if russian_business_range:
+            due_dt = self._add_business_days(anchor_dt, int(russian_business_range.group(2)))
+            return due_dt.astimezone().isoformat(), datetime.now(timezone.utc) >= due_dt.astimezone(timezone.utc)
+
+        russian_business_days = re.search(r"(\d+)\s*рабоч(?:их|ие)?\s*дн", deadline_text, flags=re.I)
+        if russian_business_days:
+            due_dt = self._add_business_days(anchor_dt, int(russian_business_days.group(1)))
+            return due_dt.astimezone().isoformat(), datetime.now(timezone.utc) >= due_dt.astimezone(timezone.utc)
+
+        russian_hours_range = re.search(r"(\d+)\s*-\s*(\d+)\s*час", deadline_text, flags=re.I)
+        if russian_hours_range:
+            due_dt = anchor_dt + timedelta(hours=int(russian_hours_range.group(2)))
+            return due_dt.astimezone().isoformat(), datetime.now(timezone.utc) >= due_dt.astimezone(timezone.utc)
+
+        russian_hours = re.search(r"(\d+)\s*час", deadline_text, flags=re.I)
+        if russian_hours:
+            due_dt = anchor_dt + timedelta(hours=int(russian_hours.group(1)))
+            return due_dt.astimezone().isoformat(), datetime.now(timezone.utc) >= due_dt.astimezone(timezone.utc)
+
+        russian_days_range = re.search(r"(\d+)\s*-\s*(\d+)\s*дн", deadline_text, flags=re.I)
+        if russian_days_range:
+            due_dt = anchor_dt + timedelta(days=int(russian_days_range.group(2)))
+            return due_dt.astimezone().isoformat(), datetime.now(timezone.utc) >= due_dt.astimezone(timezone.utc)
+
+        russian_days = re.search(r"(\d+)\s*дн", deadline_text, flags=re.I)
+        if russian_days:
+            due_dt = anchor_dt + timedelta(days=int(russian_days.group(1)))
+            return due_dt.astimezone().isoformat(), datetime.now(timezone.utc) >= due_dt.astimezone(timezone.utc)
+
+        hours_match = re.search(r"(\d+)\s*hours?", deadline_text, flags=re.I)
+        if hours_match:
+            due_dt = anchor_dt + timedelta(hours=int(hours_match.group(1)))
+            return due_dt.astimezone().isoformat(), datetime.now(timezone.utc) >= due_dt.astimezone(timezone.utc)
+
+        business_range_match = re.search(r"(\d+)\s*-\s*(\d+)\s*business\s*days?", deadline_text, flags=re.I)
+        if business_range_match:
+            due_dt = self._add_business_days(anchor_dt, int(business_range_match.group(2)))
+            return due_dt.astimezone().isoformat(), datetime.now(timezone.utc) >= due_dt.astimezone(timezone.utc)
+
+        business_days_match = re.search(r"(\d+)\s*business\s*days?", deadline_text, flags=re.I)
+        if business_days_match:
+            due_dt = self._add_business_days(anchor_dt, int(business_days_match.group(1)))
+            return due_dt.astimezone().isoformat(), datetime.now(timezone.utc) >= due_dt.astimezone(timezone.utc)
+
+        days_range_match = re.search(r"(\d+)\s*-\s*(\d+)\s*days?", deadline_text, flags=re.I)
+        if days_range_match:
+            due_dt = anchor_dt + timedelta(days=int(days_range_match.group(2)))
+            return due_dt.astimezone().isoformat(), datetime.now(timezone.utc) >= due_dt.astimezone(timezone.utc)
+
+        days_match = re.search(r"(\d+)\s*days?", deadline_text, flags=re.I)
+        if days_match:
+            due_dt = anchor_dt + timedelta(days=int(days_match.group(1)))
+            return due_dt.astimezone().isoformat(), datetime.now(timezone.utc) >= due_dt.astimezone(timezone.utc)
+
+        return "", False
+
+    def _normalize_transcript_entry(self, entry):
+        if isinstance(entry, dict):
+            role = (entry.get("role") or "").strip()
+            content = (entry.get("content") or "").strip()
+            ts = (entry.get("ts") or "").strip()
+        else:
+            role = ""
+            content = ""
+            ts = ""
+        if role == "customer_rep":
+            content = self._strip_customer_echo(content)
+        if not role or not content:
+            return None
+        normalized = {"role": role, "content": content}
+        if ts:
+            normalized["ts"] = ts
+        return normalized
+
+    def _normalize_transcript_entries(self, entries):
+        normalized = []
+        for entry in entries or []:
+            item = self._normalize_transcript_entry(entry)
+            if item:
+                normalized.append(item)
+        return normalized
+
+    def _append_transcript_entry(self, role, content):
+        role = (role or "").strip()
+        content = (content or "").strip()
+        if role == "customer_rep":
+            content = self._strip_customer_echo(content)
+        if not role or not content:
+            return
+        if self.transcript:
+            last = self._normalize_transcript_entry(self.transcript[-1])
+            if last and last.get("role") == role and self._normalize_message(last.get("content")) == self._normalize_message(content):
+                return
+        entry = {
+            "role": role,
+            "content": content,
+            "ts": self._utc_now_iso(),
+        }
+        self.transcript.append(entry)
+        self.last_event_at = entry["ts"]
+
+    def _rebuild_transcript_from_review_trace(self):
+        try:
+            trace_path = Path(self.review_trace_path)
+            if not trace_path.exists():
+                return []
+            transcript = []
+            target_case_type = self.case_name()
+            target_order = (self.order_num or "").strip()
+            with trace_path.open("r", encoding="utf-8") as fh:
+                for raw_line in fh:
+                    line = raw_line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except Exception:
+                        continue
+                    if target_order and (record.get("order_num") or "").strip() != target_order:
+                        continue
+                    if (record.get("case_type") or "").strip() != target_case_type:
+                        continue
+                    event = (record.get("event") or "").strip()
+                    payload = record.get("payload") or {}
+                    message = (payload.get("message") or "").strip()
+                    if not message:
+                        continue
+                    if event == "agent_message":
+                        role = "agent"
+                    elif event in {"sent_message", "customer_message_sync"}:
+                        role = "customer_rep"
+                    else:
+                        continue
+                    item = {
+                        "role": role,
+                        "content": message,
+                    }
+                    if record.get("ts"):
+                        item["ts"] = record["ts"]
+                    if transcript:
+                        last = transcript[-1]
+                        if last.get("role") == role and self._normalize_message(last.get("content")) == self._normalize_message(message):
+                            continue
+                    transcript.append(item)
+            return transcript
+        except Exception:
+            return []
+
+    def _load_full_transcript(self):
+        try:
+            path = Path(self.case_transcript_path)
+            if not path.exists():
+                rebuilt = self._rebuild_transcript_from_review_trace()
+                if rebuilt:
+                    self.transcript = self._normalize_transcript_entries(rebuilt)
+                    self._persist_full_transcript()
+                else:
+                    self.transcript = self._normalize_transcript_entries(self.transcript)
+                return
+            data = json.loads(path.read_text(encoding="utf-8"))
+            full_transcript = self._normalize_transcript_entries(data)
+            if full_transcript:
+                self.transcript = full_transcript
+            else:
+                self.transcript = self._normalize_transcript_entries(self.transcript)
+        except Exception:
+            self.transcript = self._normalize_transcript_entries(self.transcript)
+
+    def _persist_full_transcript(self):
+        try:
+            path = Path(self.case_transcript_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload = self._normalize_transcript_entries(self.transcript)
+            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+    def _sync_message_count_from_transcript(self):
+        customer_messages = 0
+        last_customer = ""
+        for item in self.transcript:
+            if item.get("role") != "customer_rep":
+                continue
+            content = self._strip_customer_echo(item.get("content") or "")
+            normalized = self._normalize_message(content)
+            if normalized and normalized != last_customer:
+                customer_messages += 1
+                last_customer = normalized
+        self.message_count = customer_messages
+
+    def _sync_last_event_from_transcript(self):
+        if not self.transcript:
+            return
+        for item in reversed(self.transcript):
+            ts = (item.get("ts") or "").strip()
+            if ts:
+                self.last_event_at = ts
+                return
+
+    def _transcript_follow_up_anchor(self):
+        if not self.follow_up_deadline:
+            return ""
+        deadline_text = (self.follow_up_deadline or "").lower().strip()
+        for item in reversed(self.transcript):
+            if item.get("role") != "agent":
+                continue
+            content = (item.get("content") or "").lower()
+            ts = (item.get("ts") or "").strip()
+            if not content or not ts:
+                continue
+            if deadline_text and deadline_text in content:
+                return ts
+            if "48 hours" in deadline_text and "48 hours" in content:
+                return ts
+            if "business days" in deadline_text and "business days" in content:
+                return ts
+        return ""
+
+    def _sync_follow_up_anchor_from_transcript(self):
+        if not self.follow_up_deadline:
+            return
+        transcript_anchor = self._transcript_follow_up_anchor()
+        if transcript_anchor:
+            self.follow_up_anchor_at = transcript_anchor
+
+    def _field_value(self, field_name):
+        mapping = {
+            "email": self.customer_email,
+            "phone": self.customer_phone,
+            "order": self.order_num,
+            "name": self.customer_name,
+        }
+        return (mapping.get(field_name, "") or "").strip()
+
+    def _has_requested_field(self, field_name):
+        return bool(self._field_value(field_name))
+
+    def _requested_field_label(self, field_name):
+        labels = {
+            "email": "email",
+            "phone": "phone",
+            "order": "order number",
+            "name": "name",
+        }
+        return labels.get(field_name, field_name or "data")
+
+    def _apply_runtime_hint(self, text):
+        note = (text or "").strip()
+        if not note:
+            return False
+        self._append_unique(self.operator_notes, note, limit=12)
+        print(f"💡 Подсказка из UI: {note}")
+        self._append_review_trace("ui_hint", {"message": note})
+        self._persist_case_memory()
+        return True
+
+    def _apply_runtime_case_data(self, payload):
+        payload = payload or {}
+        changed = []
+
+        name = normalize_customer_name(payload.get("customer_name") or payload.get("name") or self.customer_name)
+        email = normalize_customer_email(payload.get("customer_email") or payload.get("email") or self.customer_email)
+        phone = normalize_customer_phone(payload.get("customer_phone") or payload.get("phone") or self.customer_phone)
+        order = normalize_order_num(payload.get("order_num") or payload.get("order") or self.order_num)
+        details = (payload.get("details") or "").strip()
+
+        if name and name != self.customer_name:
+            self.customer_name = name
+            changed.append(f"name={self.customer_name}")
+        if email and email != self.customer_email:
+            self.customer_email = email
+            changed.append(f"email={self.customer_email}")
+        if phone and phone != self.customer_phone:
+            self.customer_phone = phone
+            changed.append(f"phone={self.customer_phone}")
+        if order and order != self.order_num:
+            self.order_num = order
+            self._refresh_case_storage_paths(move_existing=True)
+            changed.append(f"order={self.order_num}")
+        if details:
+            merged_details = (self.details or "").strip()
+            if details not in merged_details:
+                self.details = "\n".join(part for part in [merged_details, details] if part).strip()
+                changed.append("details=updated")
+
+        if not changed:
+            return False
+
+        print(f"🗂 Обновлены данные кейса из UI: {', '.join(changed)}")
+        self._append_review_trace("ui_case_data", {"changes": changed})
+        self._persist_case_memory()
+        return True
+
+    def consume_ui_commands(self):
+        queue_path = Path(self.ui_command_queue_path)
+        if not self.ui_session_id or not queue_path.exists():
+            return []
+        applied = []
+        try:
+            size = queue_path.stat().st_size
+            if self.ui_command_offset > size:
+                self.ui_command_offset = 0
+            with queue_path.open("r", encoding="utf-8") as fh:
+                fh.seek(self.ui_command_offset)
+                while True:
+                    raw_line = fh.readline()
+                    if not raw_line:
+                        break
+                    self.ui_command_offset = fh.tell()
+                    line = raw_line.strip()
+                    if not line:
+                        continue
+                    try:
+                        command = json.loads(line)
+                    except Exception:
+                        continue
+                    if (command.get("session_id") or "").strip() != self.ui_session_id:
+                        continue
+                    command_type = (command.get("type") or "").strip()
+                    payload = command.get("payload") or {}
+                    if command_type == "hint":
+                        if self._apply_runtime_hint(payload.get("text") or ""):
+                            applied.append(command_type)
+                    elif command_type == "case_data":
+                        if self._apply_runtime_case_data(payload):
+                            applied.append(command_type)
+        except Exception:
+            return applied
+        return applied
+
+    def _planning_transcript_window(self, head=4, tail=14):
+        transcript = []
+        for item in self._normalize_transcript_entries(self.transcript):
+            role = item.get("role")
+            content = item.get("content", "")
+            if role == "customer_rep":
+                content = self._strip_customer_echo(content)
+            if not content:
+                continue
+            normalized = {"role": role, "content": content}
+            if item.get("ts"):
+                normalized["ts"] = item["ts"]
+            if transcript:
+                last = transcript[-1]
+                if last.get("role") == role and self._normalize_message(last.get("content")) == self._normalize_message(content):
+                    continue
+            transcript.append(normalized)
+        if len(transcript) <= head + tail:
+            return transcript
+        hidden = len(transcript) - head - tail
+        return transcript[:head] + [{
+            "role": "context",
+            "content": f"... {hidden} earlier messages omitted from the prompt window, but they remain part of the saved case transcript.",
+        }] + transcript[-tail:]
+
+    def _conversation_outline(self):
+        outline = []
+        first_customer = next((item.get("content", "") for item in self.transcript if item.get("role") == "customer_rep"), "")
+        if first_customer:
+            outline.append(f"Case opened with: {first_customer}")
+        if self.latest_case_id:
+            outline.append(f"Active case ID: {self.latest_case_id}")
+        if self.latest_case_outcome:
+            outline.append(f"Current merchant position: {self.latest_case_outcome}")
+        elif self.last_agent_msg:
+            outline.append(f"Latest merchant message: {self.last_agent_msg}")
+        if self.follow_up_deadline:
+            outline.append(f"Current wait window: {self.follow_up_deadline}")
+        return outline[:4]
+
+    def _audit_transcript_window(self, head=8, tail=40):
+        transcript = []
+        for item in self._normalize_transcript_entries(self.transcript):
+            role = item.get("role")
+            content = item.get("content", "")
+            if role == "customer_rep":
+                content = self._strip_customer_echo(content)
+            if not content:
+                continue
+            normalized = {"role": role, "content": content}
+            if item.get("ts"):
+                normalized["ts"] = item["ts"]
+            if transcript:
+                last = transcript[-1]
+                if last.get("role") == role and self._normalize_message(last.get("content")) == self._normalize_message(content):
+                    continue
+            transcript.append(normalized)
+        if len(transcript) <= head + tail:
+            return transcript
+        hidden = len(transcript) - head - tail
+        return transcript[:head] + [{
+            "role": "context",
+            "content": f"... {hidden} earlier messages omitted from the audit prompt, but they remain part of the saved transcript.",
+        }] + transcript[-tail:]
+
+    def _post_chat_audit_stats(self):
+        transcript = self._normalize_transcript_entries(self.transcript)
+        customer_messages = []
+        for item in transcript:
+            if item.get("role") != "customer_rep":
+                continue
+            content = self._strip_customer_echo(item.get("content", ""))
+            if customer_messages and self._normalize_message(customer_messages[-1]) == self._normalize_message(content):
+                continue
+            if content:
+                customer_messages.append(content)
+        agent_messages = [item.get("content", "") for item in transcript if item.get("role") == "agent"]
+        opener_counter = Counter()
+        marker_counter = Counter()
+        near_duplicate_count = 0
+        template_markers = [
+            "please confirm",
+            "written basis",
+            "case id",
+            "timeline",
+            "escalate",
+            "refund status",
+            "i need",
+            "tracking already shows",
+        ]
+        normalized_messages = []
+        for msg in customer_messages:
+            lowered = self._normalize_message(msg)
+            normalized_messages.append(lowered)
+            words = re.findall(r"[a-z0-9']+", lowered)
+            opener = " ".join(words[:3]) if words else lowered[:24]
+            if opener:
+                opener_counter[opener] += 1
+            for marker in template_markers:
+                if marker in lowered:
+                    marker_counter[marker] += 1
+        for idx, current in enumerate(normalized_messages):
+            for prev in normalized_messages[:idx]:
+                if difflib.SequenceMatcher(a=current, b=prev).ratio() >= 0.88:
+                    near_duplicate_count += 1
+                    break
+        avg_words = 0.0
+        if customer_messages:
+            avg_words = round(sum(len(msg.split()) for msg in customer_messages) / len(customer_messages), 1)
+        return {
+            "customer_message_count": len(customer_messages),
+            "agent_message_count": len(agent_messages),
+            "avg_customer_words": avg_words,
+            "near_duplicate_count": near_duplicate_count,
+            "top_openers": [{"opener": opener, "count": count} for opener, count in opener_counter.most_common(5)],
+            "template_markers": [{"phrase": phrase, "count": count} for phrase, count in marker_counter.items() if count > 0],
+        }
+
+    def _render_post_chat_audit(self, audit, reason, stats):
+        summary = (audit.get("summary") or "Audit completed.").strip()
+        verdict = (audit.get("verdict") or "mixed").strip()
+        human_score = float(audit.get("human_likeness_score") or 0.0)
+        template_score = float(audit.get("template_risk_score") or 0.0)
+        persuasion_score = float(audit.get("persuasion_score") or 0.0)
+        legal_score = float(audit.get("legal_grounding_score") or 0.0)
+        strengths = [str(item).strip() for item in (audit.get("strengths") or []) if str(item).strip()]
+        bot_signals = [str(item).strip() for item in (audit.get("bot_signals") or []) if str(item).strip()]
+        fixes = [str(item).strip() for item in (audit.get("recommended_fixes") or []) if str(item).strip()]
+        examples = audit.get("notable_examples") or []
+        lines = [
+            "# Post-Chat Audit",
+            "",
+            f"- Generated: {self._utc_now_iso()}",
+            f"- Reason: {reason}",
+            f"- Store: {self.store}",
+            f"- Case: {self.case_name()}",
+            f"- Order: {self.order_num or 'N/A'}",
+            f"- Verdict: {verdict}",
+            f"- Human-likeness: {human_score:.1f}/10",
+            f"- Template risk: {template_score:.1f}/10",
+            f"- Persuasion: {persuasion_score:.1f}/10",
+            f"- Legal grounding: {legal_score:.1f}/10",
+            "",
+            "## Summary",
+            summary,
+            "",
+            "## Heuristics",
+            f"- Customer messages: {stats.get('customer_message_count', 0)}",
+            f"- Agent messages: {stats.get('agent_message_count', 0)}",
+            f"- Avg customer words/message: {stats.get('avg_customer_words', 0.0)}",
+            f"- Near-duplicate customer replies: {stats.get('near_duplicate_count', 0)}",
+        ]
+        top_openers = stats.get("top_openers") or []
+        if top_openers:
+            opener_text = ", ".join(f"`{item['opener']}` x{item['count']}" for item in top_openers)
+            lines.append(f"- Repeated openers: {opener_text}")
+        markers = stats.get("template_markers") or []
+        if markers:
+            marker_text = ", ".join(f"`{item['phrase']}` x{item['count']}" for item in markers)
+            lines.append(f"- Template markers: {marker_text}")
+        if strengths:
+            lines.extend(["", "## Human Signals"] + [f"- {item}" for item in strengths])
+        if bot_signals:
+            lines.extend(["", "## Bot Signals"] + [f"- {item}" for item in bot_signals])
+        if examples:
+            lines.append("")
+            lines.append("## Notable Examples")
+            for item in examples[:5]:
+                quote = str((item or {}).get("quote") or "").strip()
+                why = str((item or {}).get("why") or "").strip()
+                if quote:
+                    lines.append(f"- `{quote}`")
+                    if why:
+                        lines.append(f"  {why}")
+        if fixes:
+            lines.extend(["", "## Recommended Fixes"] + [f"- {item}" for item in fixes])
+        return "\n".join(lines).strip() + "\n"
+
+    def generate_post_chat_audit(self, reason="session_end"):
+        transcript = self._normalize_transcript_entries(self.transcript)
+        if not transcript:
+            return ""
+        stats = self._post_chat_audit_stats()
+        audit_input = {
+            "reason": reason,
+            "case": self.build_case_snapshot(),
+            "heuristics": stats,
+            "transcript": self._audit_transcript_window(),
+        }
+        audit = {}
+        error = ""
+        try:
+            raw = self._call_llm(
+                system_prompt=POST_CHAT_AUDIT_PROMPT,
+                history=[{"role": "user", "content": json.dumps(audit_input, ensure_ascii=True)}],
+                temperature=0.0,
+                sanitize=False,
+                max_tokens=1400,
+            )
+            audit = self._extract_json_object(raw) or {}
+        except Exception as e:
+            error = str(e)
+        if isinstance(audit, dict):
+            score_keys = [
+                "human_likeness_score",
+                "template_risk_score",
+                "persuasion_score",
+                "legal_grounding_score",
+            ]
+            raw_scores = [float(audit.get(key) or 0.0) for key in score_keys]
+            if raw_scores and any(score > 0 for score in raw_scores) and all(0.0 <= score <= 1.0 for score in raw_scores):
+                for key, score in zip(score_keys, raw_scores):
+                    audit[key] = round(score * 10.0, 1)
+        if not isinstance(audit, dict) or not audit:
+            repeated_openers = stats.get("top_openers") or []
+            opener_note = repeated_openers[0]["opener"] if repeated_openers else "n/a"
+            template_risk = 7.0 if stats.get("near_duplicate_count", 0) >= 2 else 5.0
+            human_likeness = 4.0 if template_risk >= 7.0 else 6.0
+            audit = {
+                "summary": "LLM audit was unavailable, so this report was generated from local transcript heuristics.",
+                "verdict": "templated" if template_risk >= 7.0 else "mixed",
+                "human_likeness_score": human_likeness,
+                "template_risk_score": template_risk,
+                "persuasion_score": 6.0,
+                "legal_grounding_score": 6.0,
+                "strengths": [
+                    "The audit still has a full saved transcript and message-level heuristics.",
+                ],
+                "bot_signals": [
+                    f"Most repeated opener: {opener_note}",
+                    f"Near-duplicate customer replies detected: {stats.get('near_duplicate_count', 0)}",
+                ],
+                "notable_examples": [],
+                "recommended_fixes": [
+                    "Reduce repeated opener patterns across customer replies.",
+                    "Vary the final ask so multiple turns do not end with the same structure.",
+                ],
+            }
+            if error:
+                audit["bot_signals"].append(f"Audit fallback reason: {error}")
+        report = self._render_post_chat_audit(audit, reason, stats)
+        try:
+            path = Path(self.case_audit_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(report, encoding="utf-8")
+            self._append_review_trace(
+                "post_chat_audit",
+                {
+                    "reason": reason,
+                    "audit_path": str(path),
+                    "verdict": audit.get("verdict") or "",
+                    "human_likeness_score": float(audit.get("human_likeness_score") or 0.0),
+                    "template_risk_score": float(audit.get("template_risk_score") or 0.0),
+                },
+            )
+            return str(path)
+        except Exception:
+            return ""
+
     def _load_case_memory(self):
         try:
             path = Path(self.case_memory_path)
-            if not path.exists():
-                return
-            data = json.loads(path.read_text(encoding="utf-8"))
-            self.last_agent_msg = data.get("last_agent_message", self.last_agent_msg)
-            self.last_sent_msg = data.get("last_customer_message", self.last_sent_msg)
-            self.dialogue_state = data.get("dialogue_state", self.dialogue_state)
-            self.unresolved_demands = list(data.get("unresolved_demands", self.unresolved_demands))[-12:]
-            self.confirmed_facts = list(data.get("confirmed_facts", self.confirmed_facts))[-12:]
-            self.operator_claims = list(data.get("operator_claims", self.operator_claims))[-12:]
-            self.contradictions = list(data.get("contradictions", self.contradictions))[-12:]
-            self.latest_case_id = data.get("latest_case_id", self.latest_case_id)
-            self.latest_case_outcome = data.get("latest_case_outcome", self.latest_case_outcome)
-            self.follow_up_deadline = data.get("follow_up_deadline", self.follow_up_deadline)
-            self.transcript = list(data.get("transcript_tail", self.transcript))[-24:]
-            self.last_saved_at = data.get("updated_at", self.last_saved_at)
+            if path.exists():
+                data = json.loads(path.read_text(encoding="utf-8"))
+                self.last_agent_msg = data.get("last_agent_message", self.last_agent_msg)
+                self.last_sent_msg = self._strip_customer_echo(data.get("last_customer_message", self.last_sent_msg))
+                self.dialogue_state = data.get("dialogue_state", self.dialogue_state)
+                self.unresolved_demands = list(data.get("unresolved_demands", self.unresolved_demands))[-12:]
+                self.confirmed_facts = list(data.get("confirmed_facts", self.confirmed_facts))[-12:]
+                self.operator_claims = list(data.get("operator_claims", self.operator_claims))[-12:]
+                self.contradictions = list(data.get("contradictions", self.contradictions))[-12:]
+                self.latest_case_id = data.get("latest_case_id", self.latest_case_id)
+                self.latest_case_outcome = data.get("latest_case_outcome", self.latest_case_outcome)
+                self.follow_up_deadline = data.get("follow_up_deadline", self.follow_up_deadline)
+                self.follow_up_anchor_at = data.get("follow_up_anchor_at", self.follow_up_anchor_at)
+                self.last_event_at = data.get("last_event_at", self.last_event_at)
+                self.operator_notes = list(data.get("operator_notes", self.operator_notes))[-12:]
+                self.pending_requested_field = data.get("pending_requested_field", self.pending_requested_field)
+                self.message_count = int(data.get("message_count", self.message_count) or 0)
+                self.transcript = list(data.get("transcript_tail", self.transcript))[-24:]
+                self.last_saved_at = data.get("updated_at", self.last_saved_at)
         except Exception:
             pass
+        self._load_full_transcript()
+        self._rebuild_case_state_from_transcript()
+        self._sync_message_count_from_transcript()
+        self._sync_last_event_from_transcript()
+        self._sync_follow_up_anchor_from_transcript()
+
+    def _reset_derived_case_state(self):
+        self.message_count = 0
+        self.last_agent_msg = ""
+        self.last_sent_msg = ""
+        self.dialogue_state = "opening"
+        self.unresolved_demands = []
+        self.confirmed_facts = []
+        self.operator_claims = []
+        self.contradictions = []
+        self.latest_case_id = ""
+        self.latest_case_outcome = ""
+        self.follow_up_deadline = ""
+        self.follow_up_anchor_at = ""
+        self.last_event_at = ""
+        self.pending_requested_field = ""
+
+    def _rebuild_case_state_from_transcript(self):
+        transcript = self._normalize_transcript_entries(self.transcript)
+        if not transcript:
+            return
+        preserved_notes = list(self.operator_notes)
+        preserved_saved_at = self.last_saved_at
+        self._reset_derived_case_state()
+        self.operator_notes = preserved_notes
+        self.transcript = transcript
+        for item in transcript:
+            role = item.get("role") or ""
+            content = (item.get("content") or "").strip()
+            ts = (item.get("ts") or "").strip()
+            if ts:
+                self.last_event_at = ts
+            if role == "agent":
+                self.last_agent_msg = content
+                self._update_case_memory(content, role="agent", persist=False)
+            elif role == "customer_rep":
+                self.last_sent_msg = self._strip_customer_echo(content)
+                self._update_case_memory(self.last_sent_msg, role="customer_rep", persist=False)
+        self._sync_message_count_from_transcript()
+        self._sync_last_event_from_transcript()
+        self._sync_follow_up_anchor_from_transcript()
+        self.dialogue_state = self._infer_dialogue_state()
+        self.last_saved_at = preserved_saved_at
+        self._persist_case_memory()
 
     def _persist_case_memory(self):
         try:
             path = Path(self.case_memory_path)
             path.parent.mkdir(parents=True, exist_ok=True)
+            self._sync_message_count_from_transcript()
+            self._sync_last_event_from_transcript()
+            self._sync_follow_up_anchor_from_transcript()
+            self._persist_full_transcript()
             payload = {
-                "updated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                "updated_at": self._utc_now_iso(),
                 "store": self.store,
                 "case_type": self.case_name(),
                 "order_num": self.order_num or "",
                 "customer_name": self.customer_name or "",
                 "customer_email": self.customer_email or "",
                 "customer_phone": self.customer_phone or "",
+                "message_count": self.message_count,
                 "last_agent_message": self.last_agent_msg or "",
                 "last_customer_message": self.last_sent_msg or "",
                 "dialogue_state": self.dialogue_state,
@@ -680,7 +1942,13 @@ Before answering, silently proofread the message for grammar and clarity."""
                 "latest_case_id": self.latest_case_id,
                 "latest_case_outcome": self.latest_case_outcome,
                 "follow_up_deadline": self.follow_up_deadline,
-                "transcript_tail": self.transcript[-24:],
+                "follow_up_anchor_at": self.follow_up_anchor_at,
+                "last_event_at": self.last_event_at,
+                "operator_notes": self.operator_notes[-12:],
+                "pending_requested_field": self.pending_requested_field,
+                "transcript_count": len(self.transcript),
+                "transcript_path": self.case_transcript_path,
+                "transcript_tail": self._normalize_transcript_entries(self.transcript[-24:]),
             }
             path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
             self.last_saved_at = payload["updated_at"]
@@ -688,11 +1956,12 @@ Before answering, silently proofread the message for grammar and clarity."""
             pass
 
     def record_customer_message(self, message, source="manual"):
-        message = (message or "").strip()
+        message = self._strip_customer_echo((message or "").strip())
         if not message:
             return
         self.last_sent_msg = message
-        self.transcript.append({"role": "customer_rep", "content": message})
+        self._append_transcript_entry("customer_rep", message)
+        self._sync_message_count_from_transcript()
         self._update_case_memory(message, role="customer_rep")
         self._append_review_trace(
             "customer_message_sync",
@@ -725,7 +1994,7 @@ Before answering, silently proofread the message for grammar and clarity."""
         if not agent_text:
             return
         self.last_agent_msg = agent_text
-        self.transcript.append({"role": "agent", "content": agent_text})
+        self._append_transcript_entry("agent", agent_text)
         self._update_case_memory(agent_text, role="agent")
         self._append_review_trace(
             "agent_message",
@@ -749,8 +2018,51 @@ Before answering, silently proofread the message for grammar and clarity."""
             return False
         return True
 
+    def discard_unsent_customer_message(self, message, reason="stale_context"):
+        target = self._normalize_message(self._strip_customer_echo((message or "").strip()))
+        if not target:
+            return
+        history_changed = False
+        if self.history:
+            last = self.history[-1]
+            if (
+                isinstance(last, dict)
+                and last.get("role") == "assistant"
+                and self._normalize_message(last.get("content", "")) == target
+            ):
+                self.history.pop()
+                history_changed = True
+        transcript_changed = False
+        if self.transcript:
+            last = self._normalize_transcript_entry(self.transcript[-1])
+            if (
+                last
+                and last.get("role") == "customer_rep"
+                and self._normalize_message(last.get("content", "")) == target
+            ):
+                self.transcript.pop()
+                transcript_changed = True
+        if not history_changed and not transcript_changed:
+            return
+        previous_customer = ""
+        for item in reversed(self._normalize_transcript_entries(self.transcript)):
+            if item.get("role") == "customer_rep":
+                previous_customer = self._strip_customer_echo(item.get("content", ""))
+                break
+        self.last_sent_msg = previous_customer
+        self._sync_message_count_from_transcript()
+        self._append_review_trace(
+            "discarded_pending_message",
+            {
+                "message": (message or "").strip(),
+                "reason": reason,
+                "replacement_anchor": self.last_sent_msg,
+            },
+        )
+        self._persist_case_memory()
+
     def mark_message_sent(self, message):
-        self.last_sent_msg = (message or "").strip()
+        self.last_sent_msg = self._strip_customer_echo((message or "").strip())
         self._update_case_memory(self.last_sent_msg, role="customer_rep")
         self._append_review_trace(
             "sent_message",
@@ -775,21 +2087,48 @@ Before answering, silently proofread the message for grammar and clarity."""
         if len(bucket) > limit:
             del bucket[:-limit]
 
-    def _update_case_memory(self, text, role):
+    def _update_case_memory(self, text, role, persist=True):
         t = (text or "").strip()
         lowered = t.lower()
         if not t:
             return
         if role == "agent":
             self._append_unique(self.operator_claims, t)
-            ids = re.findall(r"\bC\d{6,12}\b", t, flags=re.I)
+            ids = self._extract_case_ids(t)
             if ids:
                 self.latest_case_id = ids[-1].upper()
                 self._append_unique(self.confirmed_facts, f"Case ID {self.latest_case_id} was provided by Lenovo")
+            if any(x in lowered for x in ["na csat case manager", "escalation owner"]):
+                self._append_unique(self.confirmed_facts, "Lenovo identified the current escalation owner")
+            if any(x in lowered for x in ["refunds are processed after concession and case review is complete", "exact policy", "written policy"]):
+                self._append_unique(self.confirmed_facts, "Lenovo provided its stated policy wording for the refund delay")
+            if "there is no return policy that justifies withholding your refund" in lowered:
+                self._append_unique(self.confirmed_facts, "Lenovo admitted there is no separate return policy basis for withholding the refund")
+            if any(x in lowered for x in ["under review", "once approved", "after approval", "concession request"]):
+                self._append_unique(self.confirmed_facts, "Lenovo said the refund depends on internal approval or concession review")
+            if any(x in lowered for x in ["i do not have a firm deadline", "firm refund date depends", "no firm deadline"]):
+                self._append_unique(self.operator_claims, "Lenovo said it does not have a firm deadline for refund approval")
+            if any(x in lowered for x in ["24-48 business hours", "24 to 48 business hours", "contact us again", "reach out to us again"]):
+                self._append_unique(self.confirmed_facts, "Lenovo asked for a 24-48 business hour follow-up window")
+                self.follow_up_deadline = "24-48 business hours"
+                self.follow_up_anchor_at = self.last_event_at or self._utc_now_iso()
+                if self.latest_case_id:
+                    self.latest_case_outcome = f"Lenovo asked for a 24-48 business hour follow-up on case {self.latest_case_id}."
+            if any(x in lowered for x in ["successfully requested a refund", "requested a refund for your order"]):
+                self._append_unique(self.confirmed_facts, "Lenovo said the refund request was successfully opened")
+            if any(x in lowered for x in ["lenovo and ups will investigate", "ups will investigate"]):
+                self._append_unique(self.confirmed_facts, "Lenovo said it and UPS would investigate before completing the refund")
+            if any(x in lowered for x in ["same payment method", "original payment method", "payment method you used"]):
+                self._append_unique(self.confirmed_facts, "Lenovo said the refund would return to the original payment method")
             if any(x in lowered for x in ["empty box", "box was empty"]):
                 self._append_unique(self.operator_claims, "Lenovo claims the returned box was empty")
+            if any(x in lowered for x in ["product was not in the package", "product itself was not inside", "not inside the returned package"]):
+                self._append_unique(self.operator_claims, "Lenovo says the return package was delivered but the item was missing during inspection")
             if any(x in lowered for x in ["warehouse has not received", "not received the returned item", "not received the return"]):
                 self._append_unique(self.operator_claims, "Lenovo claims the warehouse did not receive the return")
+            if any(x in lowered for x in ["case canceled", "canceled the case"]) and any(x in lowered for x in ["ups store", "local authorities"]):
+                self._append_unique(self.operator_claims, "Lenovo canceled the internal case and redirected the customer to UPS or local authorities")
+                self.latest_case_outcome = "Lenovo said the case was canceled and redirected the customer to UPS or local authorities."
             if any(x in lowered for x in ["will be escalated", "escalated to the returns team"]):
                 self._append_unique(self.confirmed_facts, "Lenovo said the case would be escalated to the returns team")
                 self.latest_case_outcome = "Lenovo said the issue was escalated for further review."
@@ -798,6 +2137,7 @@ Before answering, silently proofread the message for grammar and clarity."""
                 self.latest_case_outcome = "Lenovo said the replacement would be escalated as a lost shipment."
             if "48 hours" in lowered:
                 self.follow_up_deadline = "48 hours"
+                self.follow_up_anchor_at = self.last_event_at or self._utc_now_iso()
                 self.latest_case_outcome = (
                     f"Lenovo opened case {self.latest_case_id} and asked for 48 hours to review the issue."
                     if self.latest_case_id else
@@ -805,10 +2145,18 @@ Before answering, silently proofread the message for grammar and clarity."""
                 )
             if any(x in lowered for x in ["5-7 business days", "processed within"]):
                 self._append_unique(self.confirmed_facts, "Lenovo stated the refund would process within 5-7 business days after receiving the return")
-                self.latest_case_outcome = "Lenovo said refunds are typically processed within 5-7 business days after receipt."
+                self.follow_up_deadline = "5-7 business days"
+                self.follow_up_anchor_at = self.last_event_at or self._utc_now_iso()
+                if any(x in lowered for x in ["successfully requested a refund", "requested a refund for your order", "lenovo and ups will investigate"]):
+                    self.latest_case_outcome = "Lenovo said the refund request was opened and that Lenovo and UPS would investigate before refunding the original payment method within 5-7 business days."
+                else:
+                    self.latest_case_outcome = "Lenovo said refunds are typically processed within 5-7 business days after receipt."
             if any(x in lowered for x in ["thank you for confirming", "thank you for staying connected", "sure, diana", "thank you, diana"]):
                 self._append_unique(self.confirmed_facts, "Lenovo acknowledged the case is still under review")
         else:
+            ids = self._extract_case_ids(t)
+            if ids:
+                self.latest_case_id = ids[-1].upper()
             if any(x in lowered for x in ["written basis", "policy basis"]):
                 self._append_unique(self.unresolved_demands, "written basis for withholding the refund")
             if "case id" in lowered:
@@ -833,19 +2181,41 @@ Before answering, silently proofread the message for grammar and clarity."""
                 self.contradictions,
                 "Lenovo has said both that the return was received back and that the warehouse did not receive it",
             )
+        if "return package was delivered but the item was missing during inspection" in claims_text and (
+            "warehouse did not receive the return" in claims_text or "not receive the return" in claims_text
+        ):
+            self._append_unique(
+                self.contradictions,
+                "Lenovo has said both that the return package was delivered and that the returned item was not actually received",
+            )
+        if "refunds are withheld if a concession is under review" in claims_text and (
+            "there is no return policy that justifies withholding your refund" in claims_text
+        ):
+            self._append_unique(
+                self.contradictions,
+                "Lenovo said the refund was being withheld during concession review, but later admitted there is no separate return policy basis for withholding it",
+            )
 
         self.dialogue_state = self._infer_dialogue_state()
-        self._persist_case_memory()
+        if persist:
+            self._persist_case_memory()
 
     def _infer_dialogue_state(self):
         intent = self.infer_agent_intent(self.last_agent_msg)
-        if self.follow_up_deadline == "48 hours" and self.latest_case_id:
+        if self.follow_up_deadline in {"48 hours", "24-48 business hours", "5-7 business days"} and self.latest_case_id:
             return "case_opened_waiting"
         if self.message_count <= 1:
             return "opening"
-        if intent == "keepalive":
+        if intent in {"keepalive", "hold_request"}:
             return "holding"
-        if intent in {"ups_redirect", "empty_box_claim", "warehouse_missing_claim"}:
+        if intent in {
+            "ups_redirect",
+            "case_canceled_ups_redirect",
+            "missing_product_after_delivery_claim",
+            "empty_box_claim",
+            "warehouse_missing_claim",
+            "supervisor_same_resolution",
+        }:
             return "denial_or_deflection"
         if intent in {"case_id_provided", "escalation_confirmed"}:
             return "escalated_pending_timeline"
@@ -854,9 +2224,26 @@ Before answering, silently proofread the message for grammar and clarity."""
         return "active_negotiation"
 
     def infer_agent_intent(self, text):
-        t = (text or "").lower()
+        t = self._operator_text(text).lower()
+        if t.strip() in {"thank you", "thanks", "ok thank you", "okay thank you"} or t.endswith(" thank you.") or t.endswith(" thank you"):
+            return "acknowledgement_only"
+        if any(x in t for x in ["retail consumer or a small business", "small business or a retail consumer"]):
+            return "consumer_type_question"
+        if (
+            any(x in t for x in ["my name is", "glad to assist you today", "glad to assist", "assist you today"])
+            and not any(x in t for x in ["have a great day ahead", "anything else i can help you with today", "before we end"])
+        ):
+            return "agent_intro"
+        if any(x in t for x in ["allow me a moment to retrieve the necessary details", "gather the information for you", "while i gather the information", "while i retrieve the necessary details"]):
+            return "information_gathering_delay"
+        if any(x in t for x in ["let me review the order details", "let me review the details", "rest assured", "i will do my best to resolve this concern", "allow me a moment to review"]):
+            return "reviewing_case"
         if any(x in t for x in ["still connected", "checking in to confirm whether we are still connected"]):
             return "keepalive"
+        if any(x in t for x in ["place this chat on hold", "please stay connected", "stay connected", "on hold for about", "stay online with me"]):
+            return "hold_request"
+        if any(x in t for x in ["go ahead and close the chat", "closing the chat", "close the chat", "haven't heard back from you"]):
+            return "closure_warning"
         if (
             ("necessary for the original item to be returned" in t or "once we receive the original unit" in t)
             and ("refund" in t or "process the refund" in t)
@@ -866,34 +2253,94 @@ Before answering, silently proofread the message for grammar and clarity."""
             return "customer_retrieve_and_rereturn"
         if "sorry for any inconvenience" in t and any(x in t for x in ["best possible resolution", "surely check the details", "help you with"]):
             return "soft_stall"
+        if any(x in t for x in ["case canceled", "canceled the case"]) and any(x in t for x in ["contact the ups store", "contact local authorities", "local authorities"]):
+            return "case_canceled_ups_redirect"
         if any(x in t for x in ["contact ups", "reach out to ups", "ups drop-off center", "ups for the order confirmation"]):
             return "ups_redirect"
+        if (
+            "dropped off" in t
+            and any(x in t for x in ["miles away", "shipping address", "intended shipping address", "ups store"])
+        ):
+            return "dropoff_location_claim"
+        if any(x in t for x in ["product itself was not inside", "product was not in the package", "product itself was missing", "not inside the returned package", "discovered that the product itself was not inside"]):
+            return "missing_product_after_delivery_claim"
         if "chat transcript" in t:
             return "transcript_offer"
-        if any(x in t for x in ["will be escalated", "escalated to the returns team"]):
+        if any(x in t for x in ["i understand your concern", "i understand, you would like", "i really appreciate your time"]):
+            return "generic_empathy"
+        if any(x in t for x in ["no further actions required from you", "there are no next steps you have to follow"]):
+            return "no_action_required"
+        if any(x in t for x in ["contact us again", "reach out to us again", "24-48 business hours", "24 to 48 business hours"]):
+            return "callback_later"
+        if any(x in t for x in ["same resolution", "same policies and have access to the same information"]):
+            return "supervisor_same_resolution"
+        if any(x in t for x in ["exact policy:", "written policy:", "refunds are processed after concession and case review is complete"]):
+            return "policy_text_provided"
+        if "there is no return policy that justifies withholding your refund" in t:
+            return "no_policy_basis"
+        if any(x in t for x in ["will be escalated", "escalated to the returns team", "i will need to escalate this issue", "i need to escalate this issue", "escalate this issue to our team"]):
             return "escalation_confirmed"
-        if any(x in t for x in ["case id", "c004094813"]) and any(x in t for x in ["here is", "shared", "raised"]):
+        if ("case id" in t or self._contains_case_id(t)) and any(x in t for x in ["here is", "shared", "raised", "confirmed"]):
             return "case_id_provided"
         if "empty box" in t or "box was empty" in t:
             return "empty_box_claim"
         if any(x in t for x in ["warehouse has not received", "not received the returned item", "not received the return"]):
             return "warehouse_missing_claim"
-        if any(x in t for x in ["5-7 business days", "processed within", "resolution timeline"]):
+        if any(x in t for x in ["48 hours", "5-7 business days", "processed within", "resolution timeline"]):
             return "timeline_statement"
+        if any(x in t for x in ["thank you for contacting", "anything else i can help you with today", "have a great day ahead"]):
+            return "closing_polite"
         return "general"
 
-    def current_objective(self):
-        intent = self.infer_agent_intent(self.last_agent_msg)
+    def current_objective(self, agent_text=""):
+        if not (agent_text or "").strip() and self._should_resume_existing_case():
+            _, due_passed = self._follow_up_due_status()
+            if due_passed:
+                return "follow up on the existing case because the promised wait window has passed, and ask whether the refund was completed or what exact step remains pending today"
+            return "follow up on the existing case instead of restarting the dispute, and ask for the current status, pending step, and next deadline"
+        intent = self.infer_agent_intent(agent_text or self.last_agent_msg)
+        if intent == "consumer_type_question":
+            return "answer the operator's classification question briefly, then keep the case moving"
+        if intent == "acknowledgement_only":
+            return "do not escalate the tone yet; wait briefly and require the actual decision or written basis next"
+        if intent == "agent_intro":
+            return "briefly restate the unresolved case and force a concrete status update, pending step, and deadline"
+        if intent == "reviewing_case":
+            return "allow the operator to review briefly, but require the exact step under review, the pending blocker, and the next update deadline"
+        if intent == "information_gathering_delay":
+            return "allow a short additional wait, but require the actual review result, review type, and next deadline when the operator returns"
         if intent == "keepalive":
             return "confirm connection and force a concrete next step"
+        if intent == "hold_request":
+            return "allow the hold briefly and require a concrete answer when the operator returns"
+        if intent == "closure_warning":
+            return "keep the chat open and force a concrete next action before the case is closed"
         if intent == "return_required_claim":
             return "state that tracking proves the return was already delivered and force warehouse verification plus refund timeline"
         if intent == "customer_retrieve_and_rereturn":
             return "reject the demand to retrieve and re-return an already delivered package and require Lenovo to verify internally"
         if intent == "soft_stall":
             return "convert empathy without action into a concrete refund status update and written timeline"
+        if intent == "generic_empathy":
+            return "turn empathy into a specific next step, missing fact, or deadline"
+        if intent == "no_action_required":
+            return "reject an open-ended callback loop and force the missing approval detail or written deadline"
+        if intent == "callback_later":
+            return "turn the callback window into a named owner, pending step, and written deadline"
+        if intent == "supervisor_same_resolution":
+            return "identify the real decision-maker and the deadline for approval instead of accepting a circular escalation"
+        if intent == "policy_text_provided":
+            return "move from policy wording to the specific pending approval step and its completion deadline"
+        if intent == "no_policy_basis":
+            return "lock in the admission and force Lenovo to state exactly what approval is still pending and when it ends"
         if intent == "ups_redirect":
             return "push Lenovo to coordinate internally with UPS and keep the case escalated"
+        if intent == "case_canceled_ups_redirect":
+            return "reject the attempt to close Lenovo's internal case, force a reopened escalation, and demand the final refund-decision deadline"
+        if intent == "dropoff_location_claim":
+            return "force Lenovo to classify the drop-off discrepancy, keep the UPS review internal, and give the refund-decision deadline"
+        if intent == "missing_product_after_delivery_claim":
+            return "lock in that Lenovo received the package, force Lenovo to classify the inspection finding, and require the final refund-decision deadline"
         if intent == "empty_box_claim":
             return "demand written basis and returns-team escalation for the empty-box claim"
         if intent == "warehouse_missing_claim":
@@ -904,19 +2351,81 @@ Before answering, silently proofread the message for grammar and clarity."""
             return "obtain written resolution timeline and exact dispute classification"
         if intent == "transcript_offer":
             return "accept the transcript only if escalation and timeline are also confirmed"
+        if intent == "timeline_statement":
+            return "lock the promised review window to a concrete follow-up deadline or next update"
+        if intent == "closing_polite":
+            return "preserve the unresolved request in one short final message before the chat closes"
         if self.dialogue_state == "case_opened_waiting":
-            return "preserve the case record and resume after the promised 48-hour review window if Lenovo does not resolve it"
+            _, due_passed = self._follow_up_due_status()
+            if due_passed:
+                return "the promised wait window has passed, so press for the refund completion status, the remaining blocker if any, and the exact completion date"
+            return "preserve the case record and resume after the promised wait window if Lenovo does not resolve it"
         return "push toward refund, escalation, written basis, and timeline"
+
+    def _deterministic_reply_intents(self):
+        return {
+            "acknowledgement_only",
+            "consumer_type_question",
+            "agent_intro",
+            "reviewing_case",
+            "information_gathering_delay",
+            "hold_request",
+            "keepalive",
+            "soft_stall",
+            "generic_empathy",
+            "closure_warning",
+            "escalation_confirmed",
+            "no_action_required",
+            "callback_later",
+            "dropoff_location_claim",
+            "case_canceled_ups_redirect",
+            "missing_product_after_delivery_claim",
+            "policy_text_provided",
+            "no_policy_basis",
+            "supervisor_same_resolution",
+            "closing_polite",
+            "transcript_offer",
+        }
 
     def plan_next_action(self, agent_text="", observation=None, first_turn=False):
         observation = observation or {}
-        transcript_tail = self.transcript[-8:]
+        transcript_window = self._planning_transcript_window()
+        if first_turn and self._should_resume_existing_case():
+            message = self._polish_chat_reply(self._follow_up_opening_message(), first_turn=True)
+            return {
+                "action": "send_message" if message else "wait",
+                "message": message,
+                "goal": self.current_objective(""),
+                "reason": "resume_existing_case_follow_up",
+                "confidence": 0.95 if message else 0.0,
+            }
+        intent = self.infer_agent_intent(agent_text)
+        if (
+            agent_text
+            and not first_turn
+            and observation.get("chat_ready", True)
+            and intent in self._deterministic_reply_intents()
+        ):
+            message = self._polish_chat_reply(
+                self._fallback_message(agent_text=agent_text, first_turn=first_turn),
+                agent_text=agent_text,
+                first_turn=first_turn,
+            )
+            return {
+                "action": "send_message" if message else "wait",
+                "message": message,
+                "goal": self.current_objective(agent_text),
+                "reason": f"deterministic_{intent}",
+                "confidence": 0.85 if message else 0.0,
+            }
         user_prompt = {
-            "case": self.build_case_snapshot(),
+            "case": self.build_case_snapshot(agent_text=agent_text),
             "first_turn": bool(first_turn),
             "latest_agent_message": agent_text or "",
             "observation": observation,
-            "transcript_tail": transcript_tail,
+            "transcript_tail": transcript_window[-8:],
+            "transcript_window": transcript_window,
+            "transcript_message_count": len(self.transcript),
             "priority": [
                 "full refund",
                 "free replacement or reshipment",
@@ -933,7 +2442,11 @@ Before answering, silently proofread the message for grammar and clarity."""
         except Exception as e:
             self.last_llm_error = str(e)
             if observation.get("chat_ready") or first_turn:
-                fallback_message = self._fallback_message(agent_text=agent_text, first_turn=first_turn)
+                fallback_message = self._polish_chat_reply(
+                    self._fallback_message(agent_text=agent_text, first_turn=first_turn),
+                    agent_text=agent_text,
+                    first_turn=first_turn,
+                )
                 return {
                     "action": "send_message" if fallback_message else "wait",
                     "message": fallback_message,
@@ -954,18 +2467,33 @@ Before answering, silently proofread the message for grammar and clarity."""
         action = (plan.get("action") or "wait").strip().lower()
         if action not in {"send_message", "wait", "finish"}:
             action = "wait"
-        raw_message = self._sanitize_reply(plan.get("message") or "") if action == "send_message" else ""
+        raw_message = self._polish_chat_reply(
+            self._sanitize_reply(plan.get("message") or ""),
+            agent_text=agent_text,
+            first_turn=first_turn,
+        ) if action == "send_message" else ""
         message = raw_message
         precheck_reason = ""
         if action == "send_message" and self._looks_like_role_inversion(message):
             precheck_reason = "role_inversion"
-            message = self._fallback_message(agent_text=agent_text, first_turn=first_turn)
+            message = self._polish_chat_reply(
+                self._fallback_message(agent_text=agent_text, first_turn=first_turn),
+                agent_text=agent_text,
+                first_turn=first_turn,
+            )
         if action == "send_message" and not self._message_addresses_intent(message, agent_text):
             precheck_reason = precheck_reason or "intent_mismatch"
-            message = self._fallback_message(agent_text=agent_text, first_turn=first_turn)
+            message = self._polish_chat_reply(
+                self._fallback_message(agent_text=agent_text, first_turn=first_turn),
+                agent_text=agent_text,
+                first_turn=first_turn,
+            )
         message_before_critic = message
         if action == "send_message":
             message = self._critic_pass(agent_text, message, observation, first_turn)
+            message = self._polish_chat_reply(message, agent_text=agent_text, first_turn=first_turn)
+            if isinstance(self.last_critic_verdict, dict):
+                self.last_critic_verdict["final_message"] = message
         self._append_review_trace(
             "reply_plan",
             {
@@ -995,92 +2523,199 @@ Before answering, silently proofread the message for grammar and clarity."""
     def _fallback_message(self, agent_text="", first_turn=False):
         issue = self.case_issue_summary()
         order = self.order_num or "my order"
+        case_ref = self.active_case_reference()
+        pressure = self.legal_pressure_level()
+        intent = self.infer_agent_intent(agent_text)
+        next_asks = self.next_best_asks(agent_text)
         if first_turn:
+            if self._should_resume_existing_case():
+                return self._follow_up_opening_message()
             if (self.case_type or "").upper() in {"DOA", "DAMAGED", "DEFECTIVE", "BROKEN"}:
                 return (
                     f"I need help with order {order}. "
-                    "I received a laptop with a broken screen, Lenovo arranged a replacement, I never received that replacement, and I already returned the defective laptop using Lenovo's label. "
+                    "I received a laptop with a broken screen, Lenovo arranged a replacement, I never received it, and I already returned the defective unit using Lenovo's UPS label. "
                     "Please confirm the full refund and the exact processing timeline today."
                 )
             return (
-                f"Hello, I need help with order {order}. "
+                f"I need help with order {order}. "
                 f"The issue is that {issue}. "
                 "Please review the case and confirm the fastest resolution available today."
             )
 
-        t = (agent_text or "").lower()
-        if any(x in t for x in ["still connected", "checking in to confirm whether we are still connected", "are we still connected"]):
+        if intent == "consumer_type_question":
+            return "I am a retail consumer."
+        if intent == "acknowledgement_only":
+            return "Understood. Please return with the actual decision or written basis."
+        if intent == "agent_intro":
+            if self._should_resume_existing_case():
+                return self._follow_up_opening_message()
             return (
-                "Yes, we are still connected. "
-                "Please confirm whether case ID C004094813 has already been escalated to the returns team and provide the written resolution timeline today."
+                f"I am following up on order {order}. "
+                "Please confirm the current case status, explain exactly what is still pending, and give the written deadline for completion."
             )
-        if "will be escalated" in t and any(x in t for x in ["case id", "c004094813", "returns team"]):
+        if intent == "reviewing_case":
+            return (
+                "That's fine. "
+                "When you finish reviewing, please tell me what exact step you are checking, what is still pending, and the next update deadline."
+            )
+        if intent == "information_gathering_delay":
+            return (
+                "That's fine. "
+                "Please come back with the actual review result, tell me what review type Lenovo is using here, and give the next update deadline."
+            )
+        if self._explicit_field_request(agent_text, "email"):
+            return f"The email on the order is {normalize_customer_email(self.customer_email)}."
+        if self._explicit_field_request(agent_text, "phone"):
+            return f"The phone number on the order is {normalize_customer_phone(self.customer_phone)}."
+        if self._explicit_field_request(agent_text, "order"):
+            return f"The order number is {normalize_order_num(self.order_num)}."
+        if self._explicit_field_request(agent_text, "name"):
+            return f"My name is {normalize_customer_name(self.customer_name)}."
+        if intent == "keepalive":
+            return (
+                "Yes, I am still here. "
+                f"Please confirm whether {case_ref} has already been escalated and tell me the exact next step and timeline."
+            )
+        if intent == "hold_request":
+            ask = next_asks[0] if next_asks else "tell me the exact next step and timeline"
+            ask = re.sub(r"^when you return,\s*", "", ask, flags=re.I)
+            return (
+                "Yes, that's fine. "
+                f"When you return, please {ask}."
+            )
+        if intent == "closure_warning":
+            ask = next_asks[0] if next_asks else "confirm the refund status or the next update deadline"
+            return (
+                "I am still here. "
+                f"Before the chat closes, please {ask}."
+            )
+        if intent == "escalation_confirmed":
+            ask = next_asks[0] if next_asks else "confirm the written resolution timeline"
             return (
                 "Thank you for confirming the escalation. "
-                "Please confirm the written resolution timeline for case ID C004094813 today and clarify whether Lenovo is treating this as an empty-box claim or a lost return."
+                f"Please {ask} today."
             )
-        if any(x in t for x in ["necessary for the original item to be returned", "once we receive the original unit"]):
+        if intent == "return_required_claim":
             return (
                 "The tracking already shows the original defective laptop was delivered back to Lenovo, so this should not still be treated as an unreceived return. "
                 "Please verify this with your warehouse and confirm the refund status plus the written refund timeline today."
             )
-        if any(x in t for x in ["retrieve the order", "retrieve the original unit", "return it to lenovo"]):
+        if intent == "customer_retrieve_and_rereturn":
             return (
                 "I should not be asked to retrieve and re-return a package that tracking already shows was delivered to Lenovo. "
                 "Please verify the discrepancy internally with your warehouse and confirm in writing whether Lenovo has the return, along with the refund timeline today."
             )
-        if "sorry for any inconvenience" in t and any(x in t for x in ["best possible resolution", "surely check the details", "help you with"]):
+        if intent in {"soft_stall", "generic_empathy"}:
+            ask = next_asks[0] if next_asks else "give me the specific next step and the timeline"
             return (
-                "Thank you, but we need a concrete update rather than a general assurance. "
-                "Please confirm the refund status for the returned defective laptop and provide the written timeline for resolution today."
+                "I need a concrete update rather than a general assurance. "
+                f"Please {ask}."
             )
-        if any(x in t for x in ["contact ups", "reach out to ups", "contact the ups drop-off center", "ups for the order confirmation"]):
+        if intent == "dropoff_location_claim":
+            return (
+                "This return used Lenovo's UPS label, so any drop-off or routing discrepancy must be handled between Lenovo and UPS internally. "
+                "Please confirm in writing whether Lenovo is treating this as a lost-return investigation, a carrier misdelivery issue, or a fraud review, name the team handling that review, and give the exact deadline for Lenovo's refund decision."
+            )
+        if intent == "case_canceled_ups_redirect":
+            return (
+                "Canceling Lenovo's internal case does not transfer a Lenovo-labeled return to me. "
+                "Please reopen or re-escalate the case, confirm whether Lenovo is treating this as a lost-return, carrier misdelivery, or tampering review, and give the written deadline for Lenovo's final refund decision."
+            )
+        if intent == "missing_product_after_delivery_claim":
+            return (
+                "You are acknowledging that the return package was delivered and then saying the item was missing during inspection. "
+                "Please confirm whether Lenovo is making an empty-box or tampering claim, identify the team handling that review, and give the written deadline for Lenovo's final refund decision."
+            )
+        if intent == "ups_redirect":
             return (
                 "The return used Lenovo's UPS label, so Lenovo should coordinate with UPS internally if Lenovo is disputing the contents of the return. "
-                "Please keep case ID C004094813 escalated with the returns team and confirm the written basis for withholding the refund plus the exact resolution timeline today."
+                f"Please keep {case_ref} escalated with the returns team and confirm the written basis for withholding the refund plus the exact resolution timeline today."
             )
-        if any(x in t for x in ["warehouse has not received", "not received the returned item", "not received the return", "returned item not received"]):
+        if intent == "warehouse_missing_claim":
             return (
                 "Your updates are inconsistent because Lenovo previously stated that the return was received back, and now you are stating that the warehouse did not receive it. "
                 "Please escalate this discrepancy to the returns team today, provide the case ID for that escalation, and confirm in writing whether Lenovo is treating this as a lost return or an empty-box claim."
             )
-        if any(x in t for x in ["email", "e-mail"]):
+        if intent == "transcript_offer":
             return (
-                f"The email on the order is {normalize_customer_email(self.customer_email)}. "
-                "Please confirm the next step and timeline after you review it."
+                "A transcript is fine, but I also need the escalation owner and the exact next update deadline before we end this chat."
             )
+        if intent == "closing_polite":
+            ask = next_asks[0] if next_asks else "confirm the next written update deadline"
+            return f"Before we end, please {ask}."
+        if intent == "empty_box_claim":
+            return (
+                f"The return for order {order} was sent using Lenovo's UPS label and Lenovo's own update states that the return was received back. "
+                "If Lenovo is asserting an empty-box exception, please escalate this to the returns team today, provide the case ID, and confirm the written basis for withholding the refund."
+            )
+        if intent == "callback_later":
+            ask = next_asks[0] if next_asks else "confirm what exact step is still pending and who owns the follow-up"
+            return (
+                "Before I wait another 24-48 business hours, I need one specific update. "
+                f"Please {ask}."
+            )
+        if intent == "no_action_required":
+            ask = next_asks[0] if next_asks else "tell me what exact approval step is still pending"
+            return (
+                "I understand you say there is nothing else for me to do. "
+                f"Please {ask} before I wait another 24-48 business hours."
+            )
+        if intent == "supervisor_same_resolution":
+            ask = next_asks[0] if next_asks else "tell me who can approve the refund and when that review will finish"
+            return (
+                "If the supervisor cannot change the outcome, then I need the real decision-maker. "
+                f"Please {ask}."
+            )
+        if intent == "policy_text_provided":
+            asks = next_asks[:2] or ["state what exact approval step is still pending", "give the deadline for when that review will finish"]
+            return (
+                f"You already provided Lenovo's policy wording for {case_ref}. "
+                f"Please {asks[0]}, and {asks[1]}."
+            )
+        if intent == "no_policy_basis":
+            asks = next_asks[:2] or ["state what exact approval step is still pending", "give the deadline for when that review will finish"]
+            return (
+                "You just confirmed there is no separate return policy basis for withholding my refund. "
+                f"Please {asks[0]}, and {asks[1]}."
+            )
+        t = self._operator_text(agent_text).lower()
         if any(x in t for x in ["ups", "receipt", "drop-off", "drop off", "empty box"]):
             return (
                 f"The return for order {order} was sent using Lenovo's UPS label and Lenovo's own update states that the return was received back. "
                 "If Lenovo is asserting an empty-box exception, please escalate this to the returns team today, provide the case ID, and confirm the written basis for withholding the refund."
             )
-        if "phone" in t:
-            return (
-                f"The phone number on the order is {normalize_customer_phone(self.customer_phone)}. "
-                "Please confirm the next step and timeline after you review it."
-            )
-        if "order" in t and any(x in t for x in ["number", "#", "num"]):
-            return (
-                f"The order number is {normalize_order_num(self.order_num)}. "
-                "Please review it and confirm what resolution you can provide today."
-            )
-        if "name" in t:
-            return (
-                f"My name is {normalize_customer_name(self.customer_name)}. "
-                "Please confirm the next step once you verify the account."
-            )
         if any(x in t for x in ["case id", "ticket", "reference"]):
-            return "Thank you. Please provide the case ID and confirm the escalation timeline in writing today."
+            if self.latest_case_id:
+                return f"The case ID is {self.latest_case_id}. Please use it to review the case and confirm the escalation timeline in writing today."
+            return "Please provide the case ID and confirm the escalation timeline in writing today."
         if any(x in t for x in ["cannot", "unable", "policy", "denied", "decline"]):
+            if pressure == "high":
+                return (
+                    "If Lenovo is refusing the refund, please provide the written policy basis and supervisor escalation today. "
+                    "If this purchase was paid by credit card, I will also preserve my billing-dispute rights, so I need the case ID and written timeline now."
+                )
             return (
                 "Please escalate this to a supervisor or escalations team and provide the policy basis in writing today. "
                 "Also confirm the case ID and deadline for resolution."
             )
         if (self.case_type or "").upper() in {"DOA", "DAMAGED", "DEFECTIVE", "BROKEN"}:
+            if pressure == "high":
+                return (
+                    f"Tracking already shows Lenovo received the return for order {order}, and I am not agreeing to an open-ended delay. "
+                    "Please confirm the full refund now or provide the written basis, escalation owner, and exact refund timeline today."
+                )
             return (
-                f"Lenovo has already received the returned merchandise for order {order}, so the refund should not remain outstanding. "
+                f"Tracking already shows Lenovo received the return for order {order}, so the refund should not remain outstanding. "
                 "Please confirm whether you will complete the full refund now or escalate this to the refunds team today with a case ID and timeline."
             )
+        if pressure == "high":
+            ask = next_asks[0] if next_asks else "provide the exact deadline so I can preserve my dispute rights"
+            return (
+                f"I need a concrete resolution on order {order} today. "
+                f"If this remains unresolved, please {ask}."
+            )
+        if next_asks:
+            return f"I need one specific update on order {order}. Please {next_asks[0]}."
         return (
             f"I need a concrete update on order {order}. "
             "Please confirm whether you can resolve this with a refund, replacement, or escalation today."
@@ -1131,7 +2766,7 @@ Before answering, silently proofread the message for grammar and clarity."""
             return fix
         try:
             critic_input = {
-                "case": self.build_case_snapshot(),
+                "case": self.build_case_snapshot(agent_text=agent_text),
                 "latest_agent_message": agent_text or "",
                 "draft_reply": draft,
                 "observation": observation or {},
@@ -1166,7 +2801,7 @@ Before answering, silently proofread the message for grammar and clarity."""
             }
         return draft
 
-    def _call_llm(self, system_prompt=None, history=None, temperature=None, sanitize=True):
+    def _call_llm(self, system_prompt=None, history=None, temperature=None, sanitize=True, max_tokens=None):
         headers = {
             "Authorization": f"Bearer {OPENAI_API_KEY}",
             "Content-Type": "application/json",
@@ -1176,7 +2811,7 @@ Before answering, silently proofread the message for grammar and clarity."""
         payload = {
             "model": OPENAI_MODEL,
             "messages": [{"role": "system", "content": system_prompt}] + history,
-            "max_tokens": 700,
+            "max_tokens": 700 if max_tokens is None else max_tokens,
             "temperature": 0.2 if temperature is None else temperature,
         }
 
@@ -1219,6 +2854,60 @@ Before answering, silently proofread the message for grammar and clarity."""
         t = re.sub(r"\n{2,}", "\n", t).strip()
         return self._enforce_first_person(t)
 
+    def _normalize_case_id_mentions(self, text):
+        t = (text or "").strip()
+        if not t:
+            return ""
+        if self.latest_case_id:
+            return re.sub(self._case_id_pattern(), self.latest_case_id, t, flags=re.I)
+        t = re.sub(rf"\bcase id\s+{self._case_id_pattern()}\b", "this case", t, flags=re.I)
+        return re.sub(self._case_id_pattern(), "this case", t, flags=re.I)
+
+    def _dedupe_sentences(self, text):
+        parts = [p.strip() for p in re.split(r"(?<=[.!?])\s+", (text or "").strip()) if p.strip()]
+        if not parts:
+            return ""
+        seen = set()
+        result = []
+        for part in parts:
+            key = self._normalize_message(part)
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(part)
+        return " ".join(result[:4]).strip()
+
+    def _polish_chat_reply(self, text, agent_text="", first_turn=False):
+        t = self._enforce_first_person(text)
+        if not t:
+            return ""
+        t = self._normalize_case_id_mentions(t)
+        replacements = [
+            (r"\bI am assisting with a case where\s+", ""),
+            (r"\bI am assisting with this case\.?\s*", ""),
+            (r"\bI am reaching out regarding\b", "I need help with"),
+            (r"\bkindly\b", "please"),
+            (r"\bwe need\b", "I need"),
+            (r"\bwe are still connected\b", "I am still here"),
+            (r"\bwe are still here\b", "I am still here"),
+            (r"\bCould you please\b", "Please"),
+            (r"\bCan you please\b", "Please"),
+        ]
+        for pattern, repl in replacements:
+            t = re.sub(pattern, repl, t, flags=re.I)
+        if not first_turn:
+            t = re.sub(r"^\s*(hello|hi)[,\s]+", "", t, flags=re.I)
+            t = re.sub(r"^\s*thank you for your message\.\s*", "", t, flags=re.I)
+            t = re.sub(r"^\s*thank you for the information\.\s*", "", t, flags=re.I)
+        t = re.sub(r"(^|[.!?]\s+)(please)\b", lambda m: f"{m.group(1)}Please", t, flags=re.I)
+        t = re.sub(r"\s+", " ", t).strip(" ,")
+        if t:
+            t = t[0].upper() + t[1:]
+        t = self._dedupe_sentences(t)
+        if not first_turn:
+            t = self._dedupe_sentences(self._diversify_repetitive_reply(t, agent_text=agent_text))
+        return t
+
     def _enforce_first_person(self, text):
         t = (text or "").strip()
         if not t:
@@ -1237,10 +2926,66 @@ Before answering, silently proofread the message for grammar and clarity."""
         for pattern, repl in replacements:
             t = re.sub(pattern, repl, t, flags=re.I)
         t = re.sub(r"\bI returned the defective laptop using Lenovo's label\b", "I returned the defective laptop using Lenovo's UPS label", t, flags=re.I)
+        t = re.sub(r"\bwe need\b", "I need", t, flags=re.I)
         return re.sub(r"\s+", " ", t).strip()
 
     def _normalize_message(self, text):
-        return re.sub(r"\s+", " ", (text or "").strip().lower())
+        stripped = self._strip_customer_echo(text or "")
+        return re.sub(r"\s+", " ", stripped.strip().lower())
+
+    def _recent_customer_replies(self, limit=3):
+        replies = []
+        for item in reversed(self._normalize_transcript_entries(self.transcript)):
+            if item.get("role") != "customer_rep":
+                continue
+            content = self._strip_customer_echo(item.get("content") or "")
+            if not content:
+                continue
+            if replies and self._normalize_message(replies[-1]) == self._normalize_message(content):
+                continue
+            replies.append(content)
+            if len(replies) >= limit:
+                break
+        return list(reversed(replies))
+
+    def _is_near_recent_customer_reply(self, text, limit=3, threshold=0.84):
+        current = self._normalize_message(text)
+        if not current or self.message_count < 3:
+            return False
+        for previous in self._recent_customer_replies(limit=limit):
+            if difflib.SequenceMatcher(a=current, b=self._normalize_message(previous)).ratio() >= threshold:
+                return True
+        return False
+
+    def _diversify_repetitive_reply(self, text, agent_text=""):
+        if not self._is_near_recent_customer_reply(text):
+            return text
+        intent = self.infer_agent_intent(agent_text)
+        if intent in {"acknowledgement_only", "information_gathering_delay", "reviewing_case", "hold_request"}:
+            return (
+                "Understood. Please come back with the actual review result, the review type Lenovo is using here, and the next update deadline."
+            )
+        if intent == "case_canceled_ups_redirect":
+            return (
+                "Canceling Lenovo's internal case does not transfer a Lenovo-labeled return to me. "
+                "Please reopen or re-escalate the case, confirm whether this is a lost-return, carrier misdelivery, or tampering review, and give the written deadline for Lenovo's final refund decision."
+            )
+        if intent == "missing_product_after_delivery_claim":
+            return (
+                "You are acknowledging that the return package was delivered and then claiming the item was missing during inspection. "
+                "Please confirm whether Lenovo is treating this as an empty-box or tampering claim, identify the team handling that review, and give the written deadline for Lenovo's final refund decision."
+            )
+        if intent in {"ups_redirect", "dropoff_location_claim"}:
+            return (
+                "Because Lenovo issued the UPS label, Lenovo must keep the UPS review internal. "
+                "Please state the review type, name the team handling it, and give the deadline for Lenovo's final refund decision."
+            )
+        if intent in {"empty_box_claim", "warehouse_missing_claim"}:
+            return (
+                "Your explanation still conflicts with the confirmed delivery record. "
+                "Please state whether Lenovo is making an empty-box, lost-return, or tampering claim, name the reviewing team, and give the written deadline for Lenovo's final decision."
+            )
+        return text
 
     def _message_addresses_intent(self, message, agent_text):
         msg = self._normalize_message(message)
@@ -1249,26 +2994,93 @@ Before answering, silently proofread the message for grammar and clarity."""
             return False
         if "the customer" in msg or "the buyer" in msg:
             return False
+        requested_field = self._requested_customer_field(agent_text)
+        if requested_field == "email":
+            return "@" in message
+        if requested_field == "phone":
+            return bool(re.search(r"\d", message)) and "phone" in msg
+        if requested_field == "order":
+            return bool(re.search(r"\d", message)) and "order" in msg
+        if requested_field == "name":
+            return msg.startswith("my name is") or "name is" in msg
+        if intent == "consumer_type_question":
+            return "retail consumer" in msg or "small business" in msg
+        if intent == "acknowledgement_only":
+            return "understood" in msg or "actual decision" in msg or "written basis" in msg
+        if intent == "agent_intro":
+            return (
+                ("following up" in msg or "order" in msg or "case id" in msg)
+                and ("current status" in msg or "pending" in msg or "deadline" in msg)
+            )
+        if intent == "reviewing_case":
+            return (
+                ("that's fine" in msg or "when you finish reviewing" in msg)
+                and ("what exact step" in msg or "pending" in msg or "next update deadline" in msg)
+            )
+        if intent == "information_gathering_delay":
+            return (
+                ("that's fine" in msg or "understood" in msg or "come back" in msg)
+                and ("review result" in msg or "review type" in msg or "next update deadline" in msg)
+            )
         if intent == "keepalive":
-            return "connected" in msg or msg.startswith("yes")
+            return "still here" in msg or "connected" in msg or msg.startswith("yes")
+        if intent == "hold_request":
+            return msg.startswith("yes") or "that's fine" in msg or "when you return" in msg
+        if intent == "closure_warning":
+            return ("still here" in msg or "chat closes" in msg or msg.startswith("i am still")) and (
+                "refund" in msg or "escalat" in msg or "next update" in msg
+            )
         if intent == "return_required_claim":
             return ("tracking" in msg or "delivered" in msg) and ("verify" in msg or "refund" in msg)
         if intent == "customer_retrieve_and_rereturn":
             return ("tracking" in msg or "delivered" in msg or "already" in msg) and ("verify" in msg or "warehouse" in msg or "discrepancy" in msg)
         if intent == "soft_stall":
             return "concrete" in msg or "timeline" in msg or "refund status" in msg
+        if intent == "generic_empathy":
+            return "specific" in msg or "next step" in msg or "pending" in msg or "timeline" in msg
+        if intent == "no_action_required":
+            return "before i wait" in msg or "pending" in msg or "approval" in msg
+        if intent == "callback_later":
+            return "24-48" in msg or "owner" in msg or "pending" in msg or "update" in msg
+        if intent == "supervisor_same_resolution":
+            return "decision-maker" in msg or "approve" in msg or "authority" in msg
+        if intent == "policy_text_provided":
+            return "approval" in msg or "pending" in msg or "deadline" in msg or "when" in msg
+        if intent == "no_policy_basis":
+            return "no separate return policy" in msg or "approval" in msg or "pending" in msg or "deadline" in msg
         if intent == "ups_redirect":
             return "ups" in msg and ("internally" in msg or "returns team" in msg or "escalat" in msg)
+        if intent == "case_canceled_ups_redirect":
+            return (
+                ("reopen" in msg or "re-escalate" in msg or "canceling lenovo's internal case" in msg)
+                and ("lost-return" in msg or "misdelivery" in msg or "tampering" in msg or "deadline" in msg)
+            )
+        if intent == "dropoff_location_claim":
+            return (
+                ("ups label" in msg or "lenovo and ups" in msg or "internally" in msg)
+                and ("lost-return" in msg or "misdelivery" in msg or "fraud review" in msg or "refund decision" in msg or "deadline" in msg)
+            )
+        if intent == "missing_product_after_delivery_claim":
+            return (
+                ("delivered" in msg or "return package was delivered" in msg)
+                and ("empty-box" in msg or "tampering" in msg or "inspection" in msg)
+                and ("team" in msg or "deadline" in msg)
+            )
         if intent == "transcript_offer":
             return "transcript" in msg or "timeline" in msg or "escalat" in msg
         if intent == "case_id_provided":
-            return "c004094813" in msg or "case id" in msg
+            case_id = (self.latest_case_id or "").lower()
+            return (case_id and case_id in msg) or self._contains_case_id(message) or "case id" in msg or "timeline" in msg
         if intent == "escalation_confirmed":
             return "timeline" in msg or "written" in msg or "empty-box" in msg or "lost return" in msg
         if intent == "empty_box_claim":
             return "empty box" in msg or "written basis" in msg or "returns team" in msg
         if intent == "warehouse_missing_claim":
             return "inconsistent" in msg or "received back" in msg or "lost return" in msg
+        if intent == "timeline_statement":
+            return "timeline" in msg or "update" in msg or "48 hours" in msg or "follow up" in msg
+        if intent == "closing_polite":
+            return "before we end" in msg or "next update" in msg or "deadline" in msg
         return True
 
     def _looks_like_role_inversion(self, text):
@@ -1284,6 +3096,7 @@ Before answering, silently proofread the message for grammar and clarity."""
             "please hold on",
             "hold on for a moment",
             "i can understand your concern",
+            "i am assisting with a case",
         )
         if t.startswith(bad_starts):
             return True
@@ -1297,6 +3110,7 @@ Before answering, silently proofread the message for grammar and clarity."""
             "i will provide you with an update",
             "while i gather this information",
             "please allow me",
+            "the customer",
         ]
         return any(fragment in t for fragment in bad_fragments)
 
@@ -1513,8 +3327,15 @@ async def read_last_agent_message(page, store):
 async def read_last_customer_message(page, store):
     sel = CHAT_SELECTORS.get(store, CHAT_SELECTORS["default"])
     try:
+        def strip_echo(text):
+            t = (text or "").strip()
+            if t.lower().startswith("your message"):
+                remainder = re.sub(r"^your message[\s:,-]*", "", t, flags=re.I).strip()
+                return remainder or t
+            return t
+
         def looks_like_noise(text):
-            t = re.sub(r"\s+", " ", (text or "").strip().lower())
+            t = re.sub(r"\s+", " ", strip_echo(text).strip().lower())
             if not t or len(t) < 2:
                 return True
             blocked = [
@@ -1537,7 +3358,7 @@ async def read_last_customer_message(page, store):
                 continue
             for el in reversed(all_elements):
                 try:
-                    text = (await el.inner_text()).strip()
+                    text = strip_echo((await el.inner_text()).strip())
                     if looks_like_noise(text):
                         continue
                     cls = (await el.get_attribute("class") or "").lower()
@@ -1549,6 +3370,128 @@ async def read_last_customer_message(page, store):
         return None
     except Exception:
         return None
+
+def normalize_live_chat_message(text):
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+    raw = re.sub(r"^your message[\s:,-]*", "", raw, flags=re.I).strip()
+    lines = [line.strip() for line in raw.splitlines() if line.strip()]
+    filtered = []
+    for idx, line in enumerate(lines):
+        lowered = line.lower()
+        if lowered in {"advisor message", "your message"}:
+            continue
+        if idx == 0 and len(line.split()) <= 4 and re.fullmatch(r"[a-z][a-z .'-]{1,40}", lowered):
+            continue
+        filtered.append(line)
+    normalized = " ".join(filtered or lines)
+    normalized = re.sub(r"\s+", " ", normalized).strip().lower()
+    return normalized
+
+def operator_context_changed(planned_agent_msg, latest_agent_msg):
+    planned = normalize_live_chat_message(planned_agent_msg)
+    latest = normalize_live_chat_message(latest_agent_msg)
+    if not latest:
+        return False
+    if not planned:
+        return True
+    return latest != planned
+
+async def clear_typed_message(page, store):
+    sel = CHAT_SELECTORS.get(store, CHAT_SELECTORS["default"])
+    frames = [page.main_frame] + list(page.frames)
+    try:
+        if store == "lenovo.com":
+            for frame in frames:
+                try:
+                    cleared = await frame.evaluate(
+                        """
+                        () => {
+                          const visible = (el) => {
+                            if (!el) return false;
+                            const r = el.getBoundingClientRect();
+                            const st = window.getComputedStyle(el);
+                            return r.width > 8 && r.height > 8 && st.visibility !== "hidden" && st.display !== "none";
+                          };
+                          const candidates = [
+                            document.querySelector("#chatInput"),
+                            document.querySelector("textarea[placeholder='Type your message here']"),
+                            document.querySelector(".cx-input textarea"),
+                            ...Array.from(document.querySelectorAll("#insideWorkflowFieldCell input[aria-label], #insideWorkflowFieldCell textarea[aria-label]"))
+                              .filter((el) => {
+                                const aria = (el.getAttribute("aria-label") || "").toLowerCase();
+                                return visible(el) && aria.includes("how can we help you today") && !/\\(\\d+ of \\d+\\)/.test(aria);
+                              }),
+                          ].filter(Boolean);
+                          const input = candidates[0];
+                          if (!input) return false;
+                          const proto = input.tagName === "TEXTAREA"
+                            ? window.HTMLTextAreaElement.prototype
+                            : window.HTMLInputElement.prototype;
+                          const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
+                          if (setter) setter.call(input, "");
+                          else input.value = "";
+                          input.focus();
+                          input.dispatchEvent(new Event("input", { bubbles: true }));
+                          input.dispatchEvent(new Event("change", { bubbles: true }));
+                          return true;
+                        }
+                        """
+                    )
+                    if cleared:
+                        return True
+                except Exception:
+                    continue
+        fallback_inputs = [
+            sel["input"],
+            "textarea[placeholder*='message' i]",
+            "textarea[placeholder*='type' i]",
+            "textarea",
+            "input[placeholder*='message' i]",
+            "input[type='text']",
+        ]
+        for frame in frames:
+            for input_sel in fallback_inputs:
+                try:
+                    input_el = await frame.query_selector(f"{input_sel}:visible")
+                except Exception:
+                    continue
+                if not input_el:
+                    continue
+                try:
+                    await input_el.fill("")
+                    return True
+                except Exception:
+                    continue
+        for frame in frames:
+            try:
+                editable = await frame.query_selector("[contenteditable='true']:visible, [role='textbox']:visible")
+            except Exception:
+                editable = None
+            if editable:
+                try:
+                    await editable.fill("")
+                    return True
+                except Exception:
+                    try:
+                        await editable.evaluate("(el) => { el.textContent = ''; }")
+                        return True
+                    except Exception:
+                        continue
+    except Exception:
+        return False
+    return False
+
+async def recheck_agent_context_before_send(page, store, session, planned_agent_msg, pending_reply):
+    latest_agent_msg = await read_last_agent_message(page, store)
+    if not operator_context_changed(planned_agent_msg, latest_agent_msg):
+        return True, planned_agent_msg
+    await clear_typed_message(page, store)
+    session.discard_unsent_customer_message(pending_reply, reason="fresh_operator_context")
+    print("🛑 Оператор прислал новый контекст до отправки. Отменяю текущий ответ и перепланирую.")
+    print(f"🆕 Новый контекст: {latest_agent_msg}")
+    return False, latest_agent_msg
 
 async def type_message(page, store, text):
     sel = CHAT_SELECTORS.get(store, CHAT_SELECTORS["default"])
@@ -1898,11 +3841,20 @@ async def send_message(page, store):
     except:
         pass
 
-async def human_send_delay(text, min_seconds=4.0, max_seconds=16.0):
+async def human_send_delay(text, min_seconds=4.5, max_seconds=22.0, turn_index=0, agent_text=""):
     """Короткая пауза перед отправкой, чтобы бот не отвечал мгновенно."""
     length = len(re.sub(r"\s+", " ", (text or "").strip()))
-    base = 4.0 + min(length / 85.0, 7.0)
-    pause = min(max(base + random.uniform(-1.2, 2.8), min_seconds), max_seconds)
+    context_length = len(re.sub(r"\s+", " ", (agent_text or "").strip()))
+    base = 4.8 + min(length / 95.0, 6.8) + min(context_length / 220.0, 2.6)
+    if turn_index >= 3:
+        base += 1.1
+    if turn_index >= 6:
+        base += 0.9
+    lowered_agent = (agent_text or "").strip().lower()
+    if lowered_agent in {"thank you.", "thank you", "thanks", "ok thank you", "okay thank you"}:
+        base += 1.4
+    pause_floor = min_seconds + (0.8 if turn_index >= 3 else 0.0) + (0.7 if context_length < 40 and turn_index >= 2 else 0.0)
+    pause = min(max(base + random.uniform(-0.6, 3.4), pause_floor), max_seconds)
     print(f"⏳ Human pause before send: {pause:.1f}s")
     await asyncio.sleep(pause)
     return False
@@ -3981,6 +5933,10 @@ def is_critical_message(text, message_count):
         "chargeback",
         "fcba",
         "ftc",
+        "regulation z",
+        "billing-dispute",
+        "billing dispute",
+        "card issuer",
         "formal dispute",
         "final notice",
         "legal",
@@ -4208,77 +6164,105 @@ async def run_session(
         except Exception:
             pass
 
-        # Генерируем первое сообщение
-        print("⚖️  Генерирую первое сообщение...")
-        first_observation = await collect_chat_observation(page, store, session)
-        first_plan = session.plan_next_action(
-            agent_text="",
-            observation=first_observation,
-            first_turn=True,
+        pending_agent_msg = ""
+        pending_agent_already_recorded = False
+        transcript_tail = session._normalize_transcript_entries(session.transcript)
+        last_transcript_role = (transcript_tail[-1].get("role") if transcript_tail else "") or ""
+        resume_existing_chat = (
+            last_transcript_role == "customer_rep"
+            and bool(session.last_sent_msg)
+            and await is_operator_chat_open(page, store)
         )
-        print(f"🧠 Agent action: {first_plan['action']} ({first_plan['reason'] or 'no reason'})")
-        first_msg = (first_plan.get("message") or "").strip()
-        if first_plan["action"] != "send_message" or not first_msg:
-            first_msg = session.generate_first_message()
+
+        if resume_existing_chat:
+            print("↩️  Последнее сообщение уже было отправлено ранее. Продолжаю диалог от текущего контекста без повторного старта.")
+            detected_agent_msg = await read_last_agent_message(page, store)
+            if detected_agent_msg and normalize_live_chat_message(detected_agent_msg) != normalize_live_chat_message(session.last_agent_msg):
+                pending_agent_msg = detected_agent_msg
+                pending_agent_already_recorded = False
+                print(f"🆕 Уже есть новый ответ оператора: {detected_agent_msg}")
         else:
-            session.history.append({"role": "assistant", "content": first_msg})
-            session.transcript.append({"role": "customer_rep", "content": first_msg})
-            session.message_count = 1
-        if not first_msg.strip():
-            first_msg = (
-                "Hello, I need support with my order. "
-                "I am requesting a concrete resolution today: either a full refund or a replacement. "
-                "Please confirm the next step and timeline."
+            # Генерируем первое сообщение
+            print("⚖️  Генерирую первое сообщение...")
+            first_observation = await collect_chat_observation(page, store, session)
+            first_plan = session.plan_next_action(
+                agent_text="",
+                observation=first_observation,
+                first_turn=True,
             )
-
-        print("\n" + "─" * 55)
-        print("📤 ПЕРВОЕ СООБЩЕНИЕ (для отправки агенту):")
-        print("─" * 55)
-        print(first_msg)
-        print("─" * 55)
-
-        if not session.should_send_message(first_msg):
-            print("⏭️  Дубликат первого сообщения обнаружен, пропускаю отправку.")
-            first_msg = ""
-
-        if first_msg and not await is_operator_chat_open(page, store):
-            print("⚠️  Операторский чат ещё не открыт. Возвращаюсь к шагам подключения.")
-            await try_open_operator_flow(page, store, session)
-            await page.wait_for_timeout(1200)
-            if not await is_operator_chat_open(page, store):
-                print("❌ Чат оператора не подтверждён. Ожидаю открытия чата и не отправляю сообщение.")
-                while not await is_operator_chat_open(page, store):
-                    await try_open_operator_flow(page, store, session)
-                    await page.wait_for_timeout(1500)
-
-        # Вставляем в чат
-        typed = False
-        if first_msg:
-            typed = await type_message(page, store, first_msg)
-            if typed:
-                print("✅ Текст вставлен в поле чата")
+            print(f"🧠 Agent action: {first_plan['action']} ({first_plan['reason'] or 'no reason'})")
+            first_msg = (first_plan.get("message") or "").strip()
+            if first_plan["action"] != "send_message" or not first_msg:
+                first_msg = session.generate_first_message()
             else:
-                print("⚠️  Не удалось вставить автоматически — скопируй вручную")
+                session.history.append({"role": "assistant", "content": first_msg})
+                session._append_transcript_entry("customer_rep", first_msg)
+                session._sync_message_count_from_transcript()
+            if not first_msg.strip():
+                first_msg = (
+                    "Hello, I need support with my order. "
+                    "I am requesting a concrete resolution today: either a full refund or a replacement. "
+                    "Please confirm the next step and timeline."
+                )
 
-        first_is_critical = is_critical_message(first_msg, session.message_count) if first_msg else False
-        should_confirm_first = (
-            (first_is_critical and not auto_send_critical) or (not first_is_critical and not auto_send_noncritical)
-        ) if first_msg else False
-        if should_confirm_first:
-            confirm = input("\n  Отправить сообщение? [Y/n]: ").strip().lower()
-            allow_send = confirm != "n"
-        else:
-            allow_send = bool(first_msg)
+            print("\n" + "─" * 55)
+            print("📤 ПЕРВОЕ СООБЩЕНИЕ (для отправки агенту):")
+            print("─" * 55)
+            print(first_msg)
+            print("─" * 55)
+
+            if not session.should_send_message(first_msg):
+                print("⏭️  Дубликат первого сообщения обнаружен, пропускаю отправку.")
+                first_msg = ""
+
+            if first_msg and not await is_operator_chat_open(page, store):
+                print("⚠️  Операторский чат ещё не открыт. Возвращаюсь к шагам подключения.")
+                await try_open_operator_flow(page, store, session)
+                await page.wait_for_timeout(1200)
+                if not await is_operator_chat_open(page, store):
+                    print("❌ Чат оператора не подтверждён. Ожидаю открытия чата и не отправляю сообщение.")
+                    while not await is_operator_chat_open(page, store):
+                        await try_open_operator_flow(page, store, session)
+                        await page.wait_for_timeout(1500)
+
+            typed = False
             if first_msg:
-                first_mode = "критичный шаг" if first_is_critical else "не критичный шаг"
-                print(f"🤖 Авто-отправка: {first_mode}, отправляю без подтверждения.")
+                typed = await type_message(page, store, first_msg)
+                if typed:
+                    print("✅ Текст вставлен в поле чата")
+                else:
+                    print("⚠️  Не удалось вставить автоматически — скопируй вручную")
 
-        if allow_send:
-            await human_send_delay(first_msg)
-            sent = await send_message(page, store)
-            print("✅ Отправлено!" if sent else "⚠️  Нажми Enter в чате вручную")
-            if sent:
-                session.mark_message_sent(first_msg)
+            first_is_critical = is_critical_message(first_msg, session.message_count) if first_msg else False
+            should_confirm_first = (
+                (first_is_critical and not auto_send_critical) or (not first_is_critical and not auto_send_noncritical)
+            ) if first_msg else False
+            if should_confirm_first:
+                confirm = input("\n  Отправить сообщение? [Y/n]: ").strip().lower()
+                allow_send = confirm != "n"
+            else:
+                allow_send = bool(first_msg)
+                if first_msg:
+                    first_mode = "критичный шаг" if first_is_critical else "не критичный шаг"
+                    print(f"🤖 Авто-отправка: {first_mode}, отправляю без подтверждения.")
+
+            if allow_send:
+                await human_send_delay(first_msg, turn_index=session.message_count, agent_text="")
+                context_is_fresh, latest_agent_msg = await recheck_agent_context_before_send(
+                    page,
+                    store,
+                    session,
+                    "",
+                    first_msg,
+                )
+                if context_is_fresh:
+                    sent = await send_message(page, store)
+                    print("✅ Отправлено!" if sent else "⚠️  Нажми Enter в чате вручную")
+                    if sent:
+                        session.mark_message_sent(first_msg)
+                else:
+                    pending_agent_msg = latest_agent_msg or ""
+                    pending_agent_already_recorded = False
 
         # Основной цикл диалога
         print("\n🔄 Онлайн-режим диалога запущен.\n")
@@ -4289,25 +6273,58 @@ async def run_session(
         else:
             auto_mode = input("  Авто-режим? (читаю чат каждые 5 сек) [Y/n]: ").strip().lower()
             use_auto = auto_mode != "n"
+        audit_reason = "session_complete"
+        should_exit_session = False
+
+        def resume_pending_operator_request():
+            requested_field = (session.pending_requested_field or "").strip()
+            if not requested_field or not session.last_agent_msg:
+                return None
+            if not session._has_requested_field(requested_field):
+                return None
+            field_label = session._requested_field_label(requested_field)
+            session.pending_requested_field = ""
+            session._persist_case_memory()
+            print(f"🟢 Получены новые данные ({field_label}) через UI. Продолжаю ответ на последний запрос оператора.")
+            return session.last_agent_msg
 
         while True:
+            session.consume_ui_commands()
+            if pending_agent_msg:
+                agent_msg = pending_agent_msg
+                agent_already_recorded = pending_agent_already_recorded
+                pending_agent_msg = ""
+                pending_agent_already_recorded = False
+            else:
+                agent_msg = resume_pending_operator_request()
+                agent_already_recorded = bool(agent_msg)
+
             if use_auto:
-                print("  👁  Слежу за чатом... (q = выход, m = ввести ответ агента вручную)")
-                agent_msg = None
+                if not agent_msg:
+                    print("  👁  Слежу за чатом... (q = выход, m = ввести ответ агента вручную)")
                 ticks = 0
                 while not agent_msg:
                     await asyncio.sleep(1)
                     ticks += 1
 
+                    session.consume_ui_commands()
+                    agent_msg = resume_pending_operator_request()
+                    agent_already_recorded = bool(agent_msg)
+                    if agent_msg:
+                        break
+
                     cmd = read_console_command()
                     if cmd:
                         cmd_low = cmd.lower()
                         if cmd_low in {"q", "quit", "exit"}:
-                            return
+                            audit_reason = "manual_quit"
+                            should_exit_session = True
+                            break
                         if cmd_low == "m":
                             manual = input("  Вставь ответ агента вручную: ").strip()
                             if manual:
                                 agent_msg = manual
+                                agent_already_recorded = False
                                 break
 
                     if ticks % 5 == 0:
@@ -4318,27 +6335,51 @@ async def run_session(
                         if detected and detected != session.last_agent_msg:
                             agent_msg = detected
                             session.last_agent_msg = detected
+                            agent_already_recorded = False
                             print(f"\n💬 АГЕНТ: {agent_msg}")
             else:
-                agent_msg = input("\n  Вставь ответ агента: ").strip()
-                if agent_msg.lower() == "q":
-                    break
+                if not agent_msg:
+                    agent_msg = input("\n  Вставь ответ агента: ").strip()
+                    agent_already_recorded = False
+                    if agent_msg.lower() == "q":
+                        audit_reason = "manual_quit"
+                        break
+
+            if should_exit_session:
+                break
 
             if not agent_msg:
                 continue
 
             print("\n⚖️  Генерирую ответ...")
+            session.consume_ui_commands()
             synced_customer = await read_last_customer_message(page, store)
             if synced_customer and synced_customer != session.last_sent_msg:
                 session.record_customer_message(synced_customer, source="transcript_sync")
+            requested_field = session._requested_customer_field(agent_msg)
+            if requested_field and not session._has_requested_field(requested_field):
+                if not agent_already_recorded:
+                    session.record_agent_message(agent_msg)
+                    agent_already_recorded = True
+                session.pending_requested_field = requested_field
+                session._persist_case_memory()
+                print(
+                    f"🛑 Оператор запросил {session._requested_field_label(requested_field)}, "
+                    "но этих данных нет. Нажмите «Обновить данные кейса» в UI, и бот продолжит без перезапуска."
+                )
+                continue
             observation = await collect_chat_observation(page, store, session)
             plan = session.plan_next_action(
                 agent_text=agent_msg,
                 observation=observation,
                 first_turn=False,
             )
+            if not agent_already_recorded:
+                session.record_agent_message(agent_msg)
+                agent_already_recorded = True
             print(f"🧠 Agent action: {plan['action']} ({plan['reason'] or 'no reason'})")
             if plan["action"] == "finish":
+                audit_reason = "planner_finish"
                 print("🏁 Агентный контур завершил кейс.")
                 break
             if plan["action"] == "wait":
@@ -4346,15 +6387,14 @@ async def run_session(
                 continue
             our_reply = (plan.get("message") or "").strip()
             if not our_reply:
-                our_reply = session.generate_reply(agent_msg)
+                our_reply = session.generate_reply(agent_msg, already_recorded=agent_already_recorded)
             else:
-                session.record_agent_message(agent_msg)
                 session.history.append({
                     "role": "user",
                     "content": f'Agent replied: "{agent_msg}"\nObservation: {json.dumps(observation, ensure_ascii=True)}',
                 })
                 session.history.append({"role": "assistant", "content": our_reply})
-                session.transcript.append({"role": "customer_rep", "content": our_reply})
+                session._append_transcript_entry("customer_rep", our_reply)
                 session.message_count += 1
             if not (our_reply or "").strip():
                 our_reply = (
@@ -4399,7 +6439,18 @@ async def run_session(
                 allow_send = True
 
             if allow_send:
-                await human_send_delay(our_reply)
+                await human_send_delay(our_reply, turn_index=session.message_count, agent_text=agent_msg)
+                context_is_fresh, latest_agent_msg = await recheck_agent_context_before_send(
+                    page,
+                    store,
+                    session,
+                    agent_msg,
+                    our_reply,
+                )
+                if not context_is_fresh:
+                    pending_agent_msg = latest_agent_msg or ""
+                    pending_agent_already_recorded = False
+                    continue
                 sent = await send_message(page, store)
                 print("✅ Отправлено!" if sent else "⚠️  Нажми Enter в чате вручную")
                 if sent:
@@ -4412,8 +6463,12 @@ async def run_session(
                 else:
                     cont = input("  Продолжить диалог? [y/N]: ").strip().lower()
                     if cont != "y":
+                        audit_reason = "manual_stop_after_final"
                         break
 
+        audit_path = session.generate_post_chat_audit(reason=audit_reason)
+        if audit_path:
+            print(f"🧾 Post-chat анализ сохранён: {audit_path}")
         print("\n✅ Сессия завершена.")
         await browser.close()
 
@@ -4442,36 +6497,46 @@ def detect_case_from_profile_name(name):
 
 async def main():
     print_banner()
+    run_config = load_run_config()
+    if run_config:
+        print("🗂️  Загружен конфиг запуска из интерфейса.")
+    ui_managed = bool((os.getenv(UI_SESSION_ENV, "") or "").strip())
+    if ui_managed:
+        print("🧭 UI-режим: интерактивные CLI-вопросы отключены.")
 
     global OPENAI_API_KEY, OPENAI_MODEL, DOLPHIN_SESSION_TOKEN, DOLPHIN_CLOUD_API_KEY
     if not OPENAI_API_KEY:
-        key = ask("OpenAI API Key (sk-...)")
+        key = run_cfg_str(run_config, "openai_api_key") or ("" if ui_managed else ask("OpenAI API Key (sk-...)"))
+        if not key:
+            print("❌ OPENAI_API_KEY не задан. Для запуска из UI укажи его в .env или окружении.")
+            sys.exit(1)
         os.environ["OPENAI_API_KEY"] = key
         OPENAI_API_KEY = key
 
     if not OPENAI_MODEL:
-        model = ask("OpenAI model", "gpt-4.1-mini")
+        model = run_cfg_str(run_config, "openai_model", "gpt-4.1-mini") or ("gpt-4.1-mini" if ui_managed else ask("OpenAI model", "gpt-4.1-mini"))
         OPENAI_MODEL = model
 
     if not DOLPHIN_SESSION_TOKEN:
-        token = ask("Dolphin Session Token (если требуется, иначе Enter)", "")
+        token = run_cfg_str(run_config, "dolphin_session_token") if run_cfg_has(run_config, "dolphin_session_token") else ("" if ui_managed else ask("Dolphin Session Token (если требуется, иначе Enter)", ""))
         if token:
             os.environ["DOLPHIN_SESSION_TOKEN"] = token
             DOLPHIN_SESSION_TOKEN = token
 
     if not DOLPHIN_CLOUD_API_KEY:
-        cloud_key = ask("Dolphin{cloud} API-ключ (если есть, иначе Enter)", "")
+        cloud_key = run_cfg_str(run_config, "dolphin_cloud_api_key") if run_cfg_has(run_config, "dolphin_cloud_api_key") else ("" if ui_managed else ask("Dolphin{cloud} API-ключ (если есть, иначе Enter)", ""))
         if cloud_key:
             os.environ["DOLPHIN_CLOUD_API_KEY"] = cloud_key
             DOLPHIN_CLOUD_API_KEY = cloud_key
 
     # ── Ввод имени профиля ──────────────────────────────────────────────────
     print()
-    autopilot = ask("Режим автопилота (минимум вопросов)? [Y/n]", "y").lower() != "n"
+    configured_autopilot = run_cfg_bool(run_config, "autopilot")
+    autopilot = configured_autopilot if configured_autopilot is not None else (True if ui_managed else ask("Режим автопилота (минимум вопросов)? [Y/n]", "y").lower() != "n")
 
-    profile_name = ask("Введи название профиля Dolphin Anty")
+    profile_name = run_cfg_str(run_config, "profile_name") or ("" if ui_managed else ask("Введи название профиля Dolphin Anty"))
     if not profile_name:
-        print("❌ Название не введено.")
+        print("❌ Название профиля не задано в конфиге запуска.")
         sys.exit(1)
 
     print(f"\n🐬 Ищу и запускаю профиль «{profile_name}»...")
@@ -4530,19 +6595,49 @@ async def main():
 
     print(f"\n📋 ДАННЫЕ КЕЙСА  (клиент: {client_name})\n")
 
-    if auto_store:
+    configured_store = run_cfg_str(run_config, "store")
+    configured_case_type = run_cfg_str(run_config, "case_type")
+    configured_order_num = run_cfg_str(run_config, "order_num")
+    configured_amount = run_cfg_str(run_config, "amount")
+    configured_details = run_cfg_str(run_config, "details")
+    configured_customer_name = run_cfg_str(run_config, "customer_name")
+    configured_customer_email = run_cfg_str(run_config, "customer_email")
+    configured_customer_phone = run_cfg_str(run_config, "customer_phone")
+    configured_resume_case_id = run_cfg_str(run_config, "resume_case_id")
+    configured_resume_follow_up_deadline = run_cfg_str(run_config, "resume_follow_up_deadline")
+    configured_resume_wait_expired = run_cfg_bool(run_config, "resume_wait_expired")
+
+    if configured_store:
+        store = configured_store
+        print(f"  🏪 Магазин: {store}  (из конфига)")
+    elif auto_store:
         print(f"  🏪 Магазин: {auto_store}  (из имени профиля)")
         store = auto_store
     else:
-        store = "Lenovo.com" if autopilot else ask("Магазин (Amazon / Lenovo.com / Zara.com / другой)", "Lenovo.com")
+        store = "Lenovo.com" if (autopilot or ui_managed) else ask("Магазин (Amazon / Lenovo.com / Zara.com / другой)", "Lenovo.com")
 
-    if auto_case:
+    if configured_case_type:
+        case_type = configured_case_type.upper()
+        print(f"  📂 Тип кейса: {case_type}  (из конфига)")
+    elif auto_case:
         print(f"  📂 Тип кейса: {auto_case}  (из имени профиля)")
         case_type = auto_case
     else:
-        case_type = ("INR" if autopilot else ask("Тип [INR = не получил товар / RNR = не вернули деньги]", "INR")).upper()
+        case_type = ("INR" if (autopilot or ui_managed) else ask("Тип [INR = не получил товар / RNR = не вернули деньги]", "INR")).upper()
 
-    use_block = ask("Вставить данные клиента блоком? [Y/n]", "y").lower() != "n"
+    has_configured_customer_data = any([
+        configured_order_num,
+        configured_customer_name,
+        configured_customer_email,
+        configured_customer_phone,
+    ])
+    configured_use_block = run_cfg_bool(run_config, "use_block")
+    if has_configured_customer_data:
+        use_block = False
+    elif configured_use_block is not None:
+        use_block = configured_use_block
+    else:
+        use_block = False if ui_managed else ask("Вставить данные клиента блоком? [Y/n]", "y").lower() != "n"
     block_data = {}
     if use_block:
         raw_block = read_multiline_block("Вставь блок данных (name/order/email/phone)")
@@ -4555,16 +6650,23 @@ async def main():
             print(f"  📧 Email: {block_data['email']}")
         if block_data.get("phone"):
             print(f"  ☎️  Phone: {block_data['phone']}")
+    elif has_configured_customer_data:
+        block_data = {
+            "name": configured_customer_name,
+            "order": configured_order_num,
+            "email": configured_customer_email,
+            "phone": configured_customer_phone,
+        }
 
-    order_num = block_data.get("order") or ask("Номер заказа (Enter = пропустить)", "")
-    amount = ask("Сумма в $ (Enter = пропустить)", "")
-    details = ask("Детали проблемы", "") if not autopilot else ""
+    order_num = configured_order_num if run_cfg_has(run_config, "order_num") else (block_data.get("order") or ("" if ui_managed else ask("Номер заказа (Enter = пропустить)", "")))
+    amount = configured_amount if run_cfg_has(run_config, "amount") else ("" if ui_managed else ask("Сумма в $ (Enter = пропустить)", ""))
+    details = configured_details if run_cfg_has(run_config, "details") else ("" if (autopilot or ui_managed) else ask("Детали проблемы", ""))
     details_lower = (details or "").lower()
     if any(k in details_lower for k in ["broken screen", "broken", "defective", "damaged", "replacement", "returned back", "returned to lenovo", "ups label"]):
         case_type = "DOA"
-    customer_name = block_data.get("name") or ask("Имя клиента для pre-chat (Enter = клиент из профиля)", client_name)
-    customer_email = block_data.get("email") or ask("Email для pre-chat (Enter = пропустить)", "")
-    customer_phone = block_data.get("phone") or ask("Phone для pre-chat (Enter = пропустить)", "")
+    customer_name = (configured_customer_name or client_name) if run_cfg_has(run_config, "customer_name") else (block_data.get("name") or (client_name if ui_managed else ask("Имя клиента для pre-chat (Enter = клиент из профиля)", client_name)))
+    customer_email = configured_customer_email if run_cfg_has(run_config, "customer_email") else (block_data.get("email") or ("" if ui_managed else ask("Email для pre-chat (Enter = пропустить)", "")))
+    customer_phone = configured_customer_phone if run_cfg_has(run_config, "customer_phone") else (block_data.get("phone") or ("" if ui_managed else ask("Phone для pre-chat (Enter = пропустить)", "")))
     if DEFAULT_CUSTOMER_NAME and customer_name == client_name:
         customer_name = DEFAULT_CUSTOMER_NAME
     customer_email = normalize_customer_email(customer_email or DEFAULT_CUSTOMER_EMAIL)
@@ -4572,7 +6674,8 @@ async def main():
     order_num = normalize_order_num(order_num or DEFAULT_ORDER_NUM)
     if customer_phone and len(re.sub(r"\D+", "", customer_phone)) < 7:
         customer_phone = ""
-    prechat_only = ask("Режим pre-chat only (без онлайн-диалога)? [y/N]", "n").lower() == "y"
+    configured_prechat_only = run_cfg_bool(run_config, "prechat_only")
+    prechat_only = configured_prechat_only if configured_prechat_only is not None else (False if ui_managed else ask("Режим pre-chat only (без онлайн-диалога)? [y/N]", "n").lower() == "y")
 
     if profile_running_without_automation and not cdp_port:
         print("\n❌ Этот профиль уже открыт без automation-порта.")
@@ -4599,6 +6702,12 @@ async def main():
         customer_email=customer_email,
         customer_phone=customer_phone,
     )
+    if configured_resume_case_id or configured_resume_follow_up_deadline:
+        session.seed_resume_context(
+            case_id=configured_resume_case_id,
+            follow_up_deadline=configured_resume_follow_up_deadline,
+            wait_expired=bool(configured_resume_wait_expired),
+        )
 
     try:
         if autopilot:
@@ -4607,9 +6716,12 @@ async def main():
             force_auto_mode = True
             print("🤖 Автопилот активен: авто-режим + авто-отправка всех шагов.")
         else:
-            auto_send_noncritical = ask("Авто-отправка не критичных шагов? [y/N]", "n").lower() == "y"
-            auto_send_critical = ask("Авто-отправка критичных шагов? [y/N]", "n").lower() == "y"
-            force_auto_mode = False
+            configured_auto_send_noncritical = run_cfg_bool(run_config, "auto_send_noncritical")
+            configured_auto_send_critical = run_cfg_bool(run_config, "auto_send_critical")
+            configured_force_auto_mode = run_cfg_bool(run_config, "force_auto_mode")
+            auto_send_noncritical = configured_auto_send_noncritical if configured_auto_send_noncritical is not None else ask("Авто-отправка не критичных шагов? [y/N]", "n").lower() == "y"
+            auto_send_critical = configured_auto_send_critical if configured_auto_send_critical is not None else ask("Авто-отправка критичных шагов? [y/N]", "n").lower() == "y"
+            force_auto_mode = configured_force_auto_mode if configured_force_auto_mode is not None else False
 
         await run_session(
             profile_id,
