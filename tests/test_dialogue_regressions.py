@@ -24,6 +24,7 @@ class DialogueRegressionTests(unittest.TestCase):
         session.latest_case_id = "C004094813"
         session.follow_up_deadline = "48 hours"
         session.follow_up_anchor_at = "2026-03-13T12:00:00-07:00"
+        session.operator_notes = []
         session.last_sent_msg = (
             "I am following up on case ID C004094813 for order 4649779458. "
             "The 48 hours window you provided has now passed."
@@ -114,6 +115,20 @@ class DialogueRegressionTests(unittest.TestCase):
         self.assertIn("Lenovo's UPS label", plan["message"])
         self.assertIn("handled between Lenovo and UPS internally", plan["message"])
         self.assertIn("refund decision", plan["message"])
+
+    def test_dropoff_claim_uses_travel_explanation_when_case_context_has_it(self):
+        session = self.make_session()
+        session.operator_notes.append(
+            "Customer was away visiting parents when the return was dropped off, so the drop-off location was away from the home address. The return used the Lenovo-issued UPS label."
+        )
+        msg = (
+            "Kartik\nAdvisor message\n"
+            "The package was dropped off 1,405 miles away from the shipping address. Please contact the UPS store."
+        )
+        plan = session.plan_next_action(agent_text=msg, observation={"chat_ready": True}, first_turn=False)
+        self.assertEqual(session.infer_agent_intent(msg), "dropoff_location_claim")
+        self.assertIn("visiting my parents", plan["message"])
+        self.assertIn("Lenovo's UPS label", plan["message"])
 
     def test_case_canceled_redirect_is_not_treated_as_generic_policy_bundle(self):
         session = self.make_session()

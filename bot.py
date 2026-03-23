@@ -682,6 +682,24 @@ class CopilotSession:
             )
         return "the returned merchandise was delivered back to the merchant but the refund is still outstanding"
 
+    def _supplemental_case_context(self):
+        parts = []
+        if self.details:
+            parts.append(self.details)
+        parts.extend(self.operator_notes[-6:])
+        parts.extend(self.confirmed_facts[-6:])
+        return " ".join(part for part in parts if part).strip()
+
+    def _dropoff_location_explanation(self):
+        text = self._supplemental_case_context().lower()
+        if not text:
+            return ""
+        if any(x in text for x in ["visiting my parents", "visited my parents", "staying with my parents", "at my parents", "parents"]):
+            return "I was away visiting my parents when I dropped off the return, so the drop-off location was away from my home address."
+        if any(x in text for x in ["away from home", "out of town", "traveling", "travelling", "visiting family", "staying with family", "temporarily away"]):
+            return "I was temporarily away from home when I dropped off the return, so the drop-off location was away from my home address."
+        return ""
+
     def _strip_customer_echo(self, text):
         t = (text or "").strip()
         if not t:
@@ -2612,12 +2630,16 @@ Before answering, silently proofread the message for grammar and clarity."""
                 f"Please {ask}."
             )
         if intent == "dropoff_location_claim":
+            travel_explanation = self._dropoff_location_explanation()
             return (
+                f"{travel_explanation + ' ' if travel_explanation else ''}"
                 "This return used Lenovo's UPS label, so any drop-off or routing discrepancy must be handled between Lenovo and UPS internally. "
                 "Please confirm in writing whether Lenovo is treating this as a lost-return investigation, a carrier misdelivery issue, or a fraud review, name the team handling that review, and give the exact deadline for Lenovo's refund decision."
             )
         if intent == "case_canceled_ups_redirect":
+            travel_explanation = self._dropoff_location_explanation()
             return (
+                f"{travel_explanation + ' ' if travel_explanation else ''}"
                 "Canceling Lenovo's internal case does not transfer a Lenovo-labeled return to me. "
                 "Please reopen or re-escalate the case, confirm whether Lenovo is treating this as a lost-return, carrier misdelivery, or tampering review, and give the written deadline for Lenovo's final refund decision."
             )
@@ -2627,7 +2649,9 @@ Before answering, silently proofread the message for grammar and clarity."""
                 "Please confirm whether Lenovo is making an empty-box or tampering claim, identify the team handling that review, and give the written deadline for Lenovo's final refund decision."
             )
         if intent == "ups_redirect":
+            travel_explanation = self._dropoff_location_explanation()
             return (
+                f"{travel_explanation + ' ' if travel_explanation else ''}"
                 "The return used Lenovo's UPS label, so Lenovo should coordinate with UPS internally if Lenovo is disputing the contents of the return. "
                 f"Please keep {case_ref} escalated with the returns team and confirm the written basis for withholding the refund plus the exact resolution timeline today."
             )
@@ -2966,7 +2990,9 @@ Before answering, silently proofread the message for grammar and clarity."""
                 "Understood. Please come back with the actual review result, the review type Lenovo is using here, and the next update deadline."
             )
         if intent == "case_canceled_ups_redirect":
+            travel_explanation = self._dropoff_location_explanation()
             return (
+                f"{travel_explanation + ' ' if travel_explanation else ''}"
                 "Canceling Lenovo's internal case does not transfer a Lenovo-labeled return to me. "
                 "Please reopen or re-escalate the case, confirm whether this is a lost-return, carrier misdelivery, or tampering review, and give the written deadline for Lenovo's final refund decision."
             )
@@ -2976,8 +3002,10 @@ Before answering, silently proofread the message for grammar and clarity."""
                 "Please confirm whether Lenovo is treating this as an empty-box or tampering claim, identify the team handling that review, and give the written deadline for Lenovo's final refund decision."
             )
         if intent in {"ups_redirect", "dropoff_location_claim"}:
+            travel_explanation = self._dropoff_location_explanation()
             return (
-                "Because Lenovo issued the UPS label, Lenovo must keep the UPS review internal. "
+                f"{travel_explanation + ' ' if travel_explanation else ''}"
+                "Because this return used Lenovo's UPS label, Lenovo must keep the UPS review internal. "
                 "Please state the review type, name the team handling it, and give the deadline for Lenovo's final refund decision."
             )
         if intent in {"empty_box_claim", "warehouse_missing_claim"}:

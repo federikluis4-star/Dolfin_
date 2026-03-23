@@ -531,3 +531,15 @@ Use one entry per significant work block.
   - Reply pacing is less robotic in later turns because the delay now accounts for conversation stage and context length rather than only draft length.
 - Issues/Notes:
   - This is still heuristic intent routing, so future regressions are most likely to come from new operator phrasings rather than from the previously observed Lenovo wording.
+
+## 2026-03-23
+- Scope: Add a grounded answer for `why was the return dropped off far from your residence?` on the Lenovo `Luna_CA` refund case.
+- Actions:
+  - Added reusable case-context parsing so the bot can use stored case notes like `I was away visiting my parents` when building replies to drop-off distance / UPS redirect challenges.
+  - Updated the `dropoff_location_claim`, `ups_redirect`, and repeated-dropoff fallback paths so they now explicitly say the customer was away from home when dropping off the return, while keeping the stronger core argument that the return used Lenovo's UPS label and Lenovo must handle UPS internally.
+  - Added a regression test that verifies the drop-off reply uses the parents/travel explanation only when the case context actually contains that fact.
+  - Stored the specific `visiting parents + Lenovo-issued UPS label` note in the saved case memory for order `4649779458`.
+- Result:
+  - If Lenovo repeats the `1,405 miles away` argument on this case, the bot can now answer with the real factual explanation instead of only repeating the generic UPS-internal argument.
+- Issues/Notes:
+  - The travel-away explanation is intentionally conditioned on saved case context so the bot does not invent this fact on unrelated cases.

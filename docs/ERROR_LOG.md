@@ -296,3 +296,15 @@ Document every meaningful runtime failure and mitigation.
   - Added regression tests for those exact scenarios and verified the suite locally.
 - Status:
   - Fixed in code and replayed locally against the problematic Lenovo phrasing; current regression suite passes.
+
+## 2026-03-23 — Drop-Off Distance Challenge Needed The Real Travel Context, Not Only The UPS-Internal Argument
+- Symptom:
+  - On the `Luna_CA` Lenovo case, the operator challenged the return by saying it was dropped off far from the customer's residence. The existing bot logic correctly said Lenovo must handle UPS internally because Lenovo issued the label, but it still omitted the genuine factual explanation that the customer was away visiting parents at the time of drop-off.
+- Cause:
+  - The bot had no reusable path for injecting saved case-specific travel context into drop-off / UPS-redirect replies.
+- Mitigation:
+  - Added a helper that reads supplemental case context from runtime details and saved operator notes.
+  - Updated drop-off / UPS-redirect replies to prepend the travel-away explanation only when the case context actually contains it.
+  - Saved the parents/travel note into the case memory for order `4649779458` and added a regression test for the behavior.
+- Status:
+  - Fixed in code; `python3 -m unittest tests/test_dialogue_regressions.py` passes locally with the new coverage.
