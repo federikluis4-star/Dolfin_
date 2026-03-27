@@ -557,3 +557,15 @@ Use one entry per significant work block.
   - Human-likeness improves on filler operator messages because the bot now waits for the substantive update instead of replying too early.
 - Issues/Notes:
   - This still relies on heuristics over noisy live-chat text, so the next most likely regressions will come from new Lenovo phrasings rather than from the exact patterns covered here.
+
+- Scope: Make contradiction handling strong enough that late Lenovo denials cannot fall back to generic empathy or soft-stall replies.
+- Actions:
+  - Added contradiction-focus helpers that identify high-value conflicts like `tracking shows delivered` versus `warehouse did not receive` or `item missing during inspection`.
+  - Taught case memory to persist operator acknowledgements that tracking indicates the return package was delivered.
+  - Raised contradiction follow-ups above generic empathy / soft-stall fallback so the bot now forces review classification, ownership, and final refund-decision dates instead of slipping back into softer template replies.
+  - Extended `tests/test_dialogue_regressions.py` with contradiction-path coverage for `generic_empathy` after delivery/intake conflicts and for contradiction-specific follow-up asks.
+- Result:
+  - When Lenovo acknowledges return delivery and then gives a conflicting warehouse or inspection story, the bot now treats that inconsistency as the main pressure point automatically.
+  - Generic reassurance language no longer dilutes those late-stage contradictions into weaker `please give an update` replies.
+- Issues/Notes:
+  - The contradiction router is intentionally focused on observed Lenovo refund patterns first; the next iteration should generalize the same pressure logic across more merchants once enough transcripts are collected.

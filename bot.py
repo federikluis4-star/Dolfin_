@@ -835,6 +835,104 @@ class CopilotSession:
             resolved.append("operator already summarized Lenovo's stated denial basis")
         return resolved[:6]
 
+    def _active_contradiction_focus(self, agent_text=""):
+        claims_text = " ".join(self.operator_claims).lower()
+        contradictions_text = " ".join(self.contradictions).lower()
+        current = self._operator_text(agent_text).lower()
+        combined = f"{claims_text} {contradictions_text} {current}".strip()
+        if not combined:
+            return ""
+        if (
+            "tracking indicates the return package was delivered" in combined
+            and "warehouse did not receive the return" in combined
+        ):
+            return "delivery_vs_warehouse_missing"
+        if (
+            "tracking indicates the return package was delivered" in combined
+            and "return package was delivered but the item was missing during inspection" in combined
+        ):
+            return "delivery_vs_inspection_missing"
+        if (
+            "return package was delivered but the item was missing during inspection" in combined
+            and "refund is being withheld because it says there is no verified return or loss confirmation" in combined
+        ):
+            return "inspection_vs_no_confirmation"
+        if "refund was being withheld during concession review" in combined and (
+            "no separate return policy basis" in combined or "there is no return policy that justifies withholding your refund" in combined
+        ):
+            return "policy_basis_conflict"
+        return ""
+
+    def _contradiction_follow_up_asks(self, focus):
+        if focus == "delivery_vs_warehouse_missing":
+            return [
+                "explain the exact gap between the carrier delivery record and Lenovo's warehouse intake",
+                "state whether Lenovo is treating this as a lost-return, warehouse-intake, or tampering review",
+                "identify the team handling that review and give the exact date of Lenovo's final refund decision",
+            ]
+        if focus == "delivery_vs_inspection_missing":
+            return [
+                "state whether Lenovo is treating this as an empty-box, tampering, or lost-return review",
+                "explain how Lenovo can acknowledge delivery and inspection while still withholding the refund",
+                "identify the team handling that review and give the exact date of Lenovo's final refund decision",
+            ]
+        if focus == "inspection_vs_no_confirmation":
+            return [
+                "explain how Lenovo can say the package was inspected while also saying there is no verified return or loss confirmation",
+                "state the exact review type Lenovo is using on this case",
+                "identify the team handling that review and give the exact date of Lenovo's final refund decision",
+            ]
+        if focus == "policy_basis_conflict":
+            return [
+                "state Lenovo's official basis for withholding the refund in one clear summary",
+                "confirm what exact approval step is still pending",
+                "identify the owner of that decision and give the date when Lenovo will finish it",
+            ]
+        return []
+
+    def _contradiction_follow_up_message(self, focus):
+        asks = self._contradiction_follow_up_asks(focus)
+        if focus == "delivery_vs_warehouse_missing":
+            return (
+                "Your position is inconsistent. Lenovo acknowledged that the tracking indicates the return package was delivered, "
+                "but Lenovo is also saying the warehouse did not receive the unit. "
+                f"Please {asks[0]}, {asks[1]}, and {asks[2]}."
+            )
+        if focus == "delivery_vs_inspection_missing":
+            return (
+                "Your updates are inconsistent. Lenovo is acknowledging that the return package was delivered, "
+                "but is also saying the item was missing during inspection. "
+                f"Please {asks[0]}, {asks[1]}, and {asks[2]}."
+            )
+        if focus == "inspection_vs_no_confirmation":
+            return (
+                "Lenovo's explanation is inconsistent. Lenovo is saying the delivered package was inspected, "
+                "but also saying there is no verified return or loss confirmation. "
+                f"Please {asks[0]}, {asks[1]}, and {asks[2]}."
+            )
+        if focus == "policy_basis_conflict":
+            return (
+                "Lenovo's explanation is inconsistent. Lenovo said the refund was withheld during internal review, "
+                "but also admitted there is no separate return policy basis for withholding it. "
+                f"Please {asks[0]}, {asks[1]}, and {asks[2]}."
+            )
+        return ""
+
+    def _should_force_contradiction_follow_up(self, agent_text=""):
+        focus = self._active_contradiction_focus(agent_text=agent_text)
+        if not focus:
+            return False
+        intent = self.infer_agent_intent(agent_text or self.last_agent_msg)
+        return intent in {
+            "generic_empathy",
+            "soft_stall",
+            "timeline_statement",
+            "callback_later",
+            "no_action_required",
+            "transcript_offer",
+            "general",
+        }
+
     def next_best_asks(self, agent_text=""):
         intent = self.infer_agent_intent(agent_text or self.last_agent_msg)
         points = self._known_case_points(agent_text=agent_text)
@@ -900,6 +998,9 @@ class CopilotSession:
             asks.append("explain why Lenovo is withholding the refund when Lenovo's own UPS label and internal carrier review are involved")
             asks.append("name the team handling this review and give the exact deadline for Lenovo's refund decision")
             return asks
+        contradiction_focus = self._active_contradiction_focus(agent_text=agent_text)
+        if contradiction_focus:
+            return self._contradiction_follow_up_asks(contradiction_focus)
         if self._needs_case_stage_follow_up():
             asks.append("confirm the current stage of the case")
             asks.append("explain exactly what step is still pending")
@@ -2259,6 +2360,15 @@ Before answering, silently proofread the message for grammar and clarity."""
                 self._append_unique(self.confirmed_facts, "Lenovo said it and UPS would investigate before completing the refund")
             if any(x in lowered for x in ["same payment method", "original payment method", "payment method you used"]):
                 self._append_unique(self.confirmed_facts, "Lenovo said the refund would return to the original payment method")
+            if any(x in lowered for x in [
+                "tracking confirms delivery back to lenovo",
+                "tracking confirms delivery back to the warehouse",
+                "tracking indicates the package was returned",
+                "package may have been returned to the warehouse",
+                "returned to the warehouse",
+                "returned back to lenovo",
+            ]):
+                self._append_unique(self.operator_claims, "Lenovo acknowledged that tracking indicates the return package was delivered")
             if any(x in lowered for x in ["empty box", "box was empty"]):
                 self._append_unique(self.operator_claims, "Lenovo claims the returned box was empty")
             if any(x in lowered for x in [
@@ -2361,12 +2471,26 @@ Before answering, silently proofread the message for grammar and clarity."""
                 self.contradictions,
                 "Lenovo has said both that the box was empty and that the warehouse did not receive the return",
             )
+        if "tracking indicates the return package was delivered" in claims_text and (
+            "warehouse did not receive the return" in claims_text or "not receive the return" in claims_text
+        ):
+            self._append_unique(
+                self.contradictions,
+                "Lenovo has acknowledged that tracking indicates the return package was delivered, but also says the warehouse did not receive it",
+            )
         if "received back" in claims_text and (
             "warehouse did not receive the return" in claims_text or "not receive the return" in claims_text
         ):
             self._append_unique(
                 self.contradictions,
                 "Lenovo has said both that the return was received back and that the warehouse did not receive it",
+            )
+        if "tracking indicates the return package was delivered" in claims_text and (
+            "return package was delivered but the item was missing during inspection" in claims_text
+        ):
+            self._append_unique(
+                self.contradictions,
+                "Lenovo has acknowledged delivery of the return package, but also says the item was missing during inspection",
             )
         if "return package was delivered but the item was missing during inspection" in claims_text and (
             "warehouse did not receive the return" in claims_text or "not receive the return" in claims_text
@@ -2597,6 +2721,9 @@ Before answering, silently proofread the message for grammar and clarity."""
             return "lock the promised review window to a concrete follow-up deadline or next update"
         if intent == "closing_polite":
             return "preserve the unresolved request in one short final message before the chat closes"
+        contradiction_focus = self._active_contradiction_focus(agent_text=agent_text)
+        if contradiction_focus:
+            return "lock in Lenovo's inconsistency, force the exact review classification, the responsible team, and the final refund-decision date"
         if self._needs_case_stage_follow_up():
             return "because Lenovo already requested the UPS receipt and the promised window has passed, force the current case stage, exact pending step, current owner, and final refund-decision date"
         if self.dialogue_state == "case_opened_waiting":
@@ -2870,6 +2997,9 @@ Before answering, silently proofread the message for grammar and clarity."""
                 "I should not be asked to retrieve and re-return a package that tracking already shows was delivered to Lenovo. "
                 "Please verify the discrepancy internally with your warehouse and confirm in writing whether Lenovo has the return, along with the refund timeline today."
             )
+        contradiction_focus = self._active_contradiction_focus(agent_text=agent_text)
+        if self._should_force_contradiction_follow_up(agent_text=agent_text):
+            return self._contradiction_follow_up_message(contradiction_focus)
         if intent in {"soft_stall", "generic_empathy"}:
             ask = next_asks[0] if next_asks else "give me the specific next step and the timeline"
             return (
@@ -3305,6 +3435,9 @@ Before answering, silently proofread the message for grammar and clarity."""
                 "Your explanation still conflicts with the confirmed delivery record. "
                 "Please state whether Lenovo is making an empty-box, lost-return, or tampering claim, name the reviewing team, and give the written deadline for Lenovo's final decision."
             )
+        contradiction_focus = self._active_contradiction_focus(agent_text=agent_text)
+        if contradiction_focus:
+            return self._contradiction_follow_up_message(contradiction_focus)
         return text
 
     def _message_addresses_intent(self, message, agent_text):
@@ -3355,13 +3488,13 @@ Before answering, silently proofread the message for grammar and clarity."""
         if intent == "customer_retrieve_and_rereturn":
             return ("tracking" in msg or "delivered" in msg or "already" in msg) and ("verify" in msg or "warehouse" in msg or "discrepancy" in msg)
         if intent == "soft_stall":
-            return "concrete" in msg or "timeline" in msg or "refund status" in msg
+            return "concrete" in msg or "timeline" in msg or "refund status" in msg or "inconsistent" in msg or "review type" in msg
         if intent == "generic_empathy":
-            return "specific" in msg or "next step" in msg or "pending" in msg or "timeline" in msg
+            return "specific" in msg or "next step" in msg or "pending" in msg or "timeline" in msg or "inconsistent" in msg or "review type" in msg
         if intent == "no_action_required":
-            return "before i wait" in msg or "pending" in msg or "approval" in msg
+            return "before i wait" in msg or "pending" in msg or "approval" in msg or "inconsistent" in msg or "review type" in msg
         if intent == "callback_later":
-            return "24-48" in msg or "owner" in msg or "pending" in msg or "update" in msg
+            return "24-48" in msg or "owner" in msg or "pending" in msg or "update" in msg or "inconsistent" in msg or "review type" in msg
         if intent == "supervisor_same_resolution":
             return "decision-maker" in msg or "approve" in msg or "authority" in msg
         if intent == "policy_text_provided":

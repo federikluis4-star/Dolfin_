@@ -324,3 +324,16 @@ Document every meaningful runtime failure and mitigation.
   - Extended the regression suite to cover those scenarios.
 - Status:
   - Fixed in code; `python3 -m unittest tests/test_dialogue_regressions.py` now passes with the new stage-aware and wait-on-preamble coverage.
+
+## 2026-03-27 — Lenovo Contradictions Still Sometimes Collapsed Into Generic Empathy Replies
+- Symptom:
+  - Even after the bot learned to track overdue receipt-submitted cases, a later operator message like `I understand your concern` could still cause the reply layer to back off into a generic request for an update instead of pressing Lenovo on the contradiction it had already created.
+- Cause:
+  - Contradiction state was stored, but it was not given enough priority in the generic empathy / soft-stall fallback path.
+  - Operator acknowledgements that tracking showed the return package was delivered were not consistently persisted as a structured claim, which weakened contradiction detection.
+- Mitigation:
+  - Added contradiction-focus helpers and a contradiction-priority reply path for delivery-vs-warehouse and delivery-vs-inspection conflicts.
+  - Persisted operator acknowledgements that tracking indicates the return package was delivered.
+  - Added regression tests to ensure generic empathy after those contradictions now produces an inconsistency-based follow-up instead of a softer generic reply.
+- Status:
+  - Fixed in code; the local regression suite passes and the contradiction replay now yields a direct inconsistency challenge with review classification, owner, and final refund-decision date requests.

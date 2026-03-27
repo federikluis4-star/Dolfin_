@@ -226,6 +226,47 @@ class DialogueRegressionTests(unittest.TestCase):
         self.assertEqual(plan["reason"], "deterministic_missing_product_after_delivery_claim")
         self.assertIn("empty-box or tampering claim", plan["message"])
 
+    def test_generic_empathy_after_delivery_vs_warehouse_conflict_forces_contradiction_follow_up(self):
+        session = self.make_session()
+        session._update_case_memory(
+            "According to the tracking information, it appears that the package may have been returned to the warehouse.",
+            role="agent",
+            persist=False,
+        )
+        session._update_case_memory(
+            "The warehouse team has confirmed that they have not been able to find the unit upon checking the package.",
+            role="agent",
+            persist=False,
+        )
+        msg = (
+            "Davinder\nAdvisor message\n"
+            "I understand your concern and I appreciate your time."
+        )
+        plan = session.plan_next_action(agent_text=msg, observation={"chat_ready": True}, first_turn=False)
+        self.assertEqual(session.infer_agent_intent(msg), "generic_empathy")
+        self.assertEqual(plan["reason"], "deterministic_generic_empathy")
+        self.assertIn("inconsistent", plan["message"].lower())
+        self.assertIn("review", plan["message"].lower())
+        self.assertIn("final refund decision", plan["message"].lower())
+
+    def test_contradiction_follow_up_asks_prioritize_gap_review_type_and_decision_date(self):
+        session = self.make_session()
+        session._update_case_memory(
+            "According to the tracking information, it appears that the package may have been returned to the warehouse.",
+            role="agent",
+            persist=False,
+        )
+        session._update_case_memory(
+            "The warehouse has not received the returned item.",
+            role="agent",
+            persist=False,
+        )
+        asks = session.next_best_asks("Advisor message\nPlease be assured that I am dedicated to supporting you throughout this process.")
+        joined = " | ".join(asks).lower()
+        self.assertIn("carrier delivery record", joined)
+        self.assertIn("review", joined)
+        self.assertIn("final refund decision", joined)
+
     def test_lost_case_denied_requests_final_denial_summary_and_case_status(self):
         session = self.make_session()
         msg = (
