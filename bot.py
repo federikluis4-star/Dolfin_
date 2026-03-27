@@ -867,26 +867,26 @@ class CopilotSession:
         if focus == "delivery_vs_warehouse_missing":
             return [
                 "explain the exact gap between the carrier delivery record and Lenovo's warehouse intake",
-                "state whether Lenovo is treating this as a lost-return, warehouse-intake, or tampering review",
-                "identify the team handling that review and give the exact date of Lenovo's final refund decision",
+                "state whether Lenovo is treating this as a lost-return, warehouse-intake, or tampering review and give the exact date of Lenovo's final refund decision",
+                "identify the team handling that review",
             ]
         if focus == "delivery_vs_inspection_missing":
             return [
                 "state whether Lenovo is treating this as an empty-box, tampering, or lost-return review",
+                "give the exact date of Lenovo's final refund decision and identify the team handling that review",
                 "explain how Lenovo can acknowledge delivery and inspection while still withholding the refund",
-                "identify the team handling that review and give the exact date of Lenovo's final refund decision",
             ]
         if focus == "inspection_vs_no_confirmation":
             return [
                 "explain how Lenovo can say the package was inspected while also saying there is no verified return or loss confirmation",
-                "state the exact review type Lenovo is using on this case",
-                "identify the team handling that review and give the exact date of Lenovo's final refund decision",
+                "state the exact review type Lenovo is using on this case and give the exact date of Lenovo's final refund decision",
+                "identify the team handling that review",
             ]
         if focus == "policy_basis_conflict":
             return [
                 "state Lenovo's official basis for withholding the refund in one clear summary",
-                "confirm what exact approval step is still pending",
-                "identify the owner of that decision and give the date when Lenovo will finish it",
+                "confirm what exact approval step is still pending and give the date when Lenovo will finish it",
+                "identify the owner of that decision",
             ]
         return []
 
@@ -894,27 +894,43 @@ class CopilotSession:
         asks = self._contradiction_follow_up_asks(focus)
         if focus == "delivery_vs_warehouse_missing":
             return (
-                "Your position is inconsistent. Lenovo acknowledged that the tracking indicates the return package was delivered, "
+                self._choose_nonrepetitive_lead([
+                    "Your position is inconsistent.",
+                    "Those Lenovo updates do not line up.",
+                ])
+                + " Lenovo acknowledged that the tracking indicates the return package was delivered, "
                 "but Lenovo is also saying the warehouse did not receive the unit. "
-                f"Please {asks[0]}, {asks[1]}, and {asks[2]}."
+                + self._compose_follow_up_request(asks, max_items=2)
             )
         if focus == "delivery_vs_inspection_missing":
             return (
-                "Your updates are inconsistent. Lenovo is acknowledging that the return package was delivered, "
+                self._choose_nonrepetitive_lead([
+                    "Your updates are inconsistent.",
+                    "Those Lenovo updates still conflict with each other.",
+                ])
+                + " Lenovo is acknowledging that the return package was delivered, "
                 "but is also saying the item was missing during inspection. "
-                f"Please {asks[0]}, {asks[1]}, and {asks[2]}."
+                + self._compose_follow_up_request(asks, max_items=2)
             )
         if focus == "inspection_vs_no_confirmation":
             return (
-                "Lenovo's explanation is inconsistent. Lenovo is saying the delivered package was inspected, "
+                self._choose_nonrepetitive_lead([
+                    "Lenovo's explanation is inconsistent.",
+                    "That Lenovo explanation does not hold together.",
+                ])
+                + " Lenovo is saying the delivered package was inspected, "
                 "but also saying there is no verified return or loss confirmation. "
-                f"Please {asks[0]}, {asks[1]}, and {asks[2]}."
+                + self._compose_follow_up_request(asks, max_items=2)
             )
         if focus == "policy_basis_conflict":
             return (
-                "Lenovo's explanation is inconsistent. Lenovo said the refund was withheld during internal review, "
+                self._choose_nonrepetitive_lead([
+                    "Lenovo's explanation is inconsistent.",
+                    "That Lenovo explanation still conflicts with the prior update.",
+                ])
+                + " Lenovo said the refund was withheld during internal review, "
                 "but also admitted there is no separate return policy basis for withholding it. "
-                f"Please {asks[0]}, {asks[1]}, and {asks[2]}."
+                + self._compose_follow_up_request(asks, max_items=2)
             )
         return ""
 
@@ -958,33 +974,28 @@ class CopilotSession:
     def _late_denial_follow_up_asks(self, state):
         if state == "formal_denial_needs_basis":
             return [
-                "confirm whether this is Lenovo's final denial or whether the case is still under review",
-                "state the official denial basis in one clear summary",
-                "name the team or owner who made that denial decision",
+                "confirm whether this is Lenovo's final denial and whether the case is still under review or closed",
+                "state the official denial basis in one clear summary and name the team or owner who made that denial decision",
             ]
         if state == "formal_denial_basis_withheld":
             return [
                 "provide Lenovo's official non-confidential summary of the denial basis",
-                "confirm who owns the final decision on the case",
-                "confirm whether the case is now closed or still under review",
+                "confirm who owns the final decision on the case and whether the case is now closed or still under review",
             ]
         if state == "formal_denial_pending_case_status":
             return [
                 "confirm whether that is Lenovo's final denial basis",
-                "confirm whether the case is now closed or still under review",
-                "name the final decision-maker or team",
+                "confirm whether the case is now closed or still under review and name the final decision-maker or team",
             ]
         if state == "external_redirect_after_denial":
             return [
                 "confirm whether Lenovo is treating this as a lost-return, carrier misdelivery, or tampering review",
-                "state Lenovo's official final position instead of redirecting me away from Lenovo",
-                "identify the team handling that review and give the exact date of Lenovo's final refund decision",
+                "state Lenovo's official final position instead of redirecting me away from Lenovo and give the exact date of Lenovo's final refund decision",
             ]
         if state == "closure_attempted_after_denial":
             return [
                 "confirm whether the case itself is now closed or still under review",
-                "state the final denial basis in one clear official summary",
-                "name the team or owner responsible for the final decision",
+                "state the final denial basis in one clear official summary and name the team or owner responsible for the final decision",
             ]
         return []
 
@@ -992,28 +1003,48 @@ class CopilotSession:
         asks = self._late_denial_follow_up_asks(state)
         if state == "formal_denial_needs_basis":
             return (
-                "Lenovo has already stated that the lost case was not approved. "
-                f"Please {asks[0]}, {asks[1]}, and {asks[2]}."
+                self._choose_nonrepetitive_lead([
+                    "Lenovo has already stated that the lost case was not approved.",
+                    "Lenovo has already said the lost case was not approved.",
+                ])
+                + " "
+                + self._compose_follow_up_request(asks, max_items=2)
             )
         if state == "formal_denial_basis_withheld":
             return (
-                "I understand Lenovo will not share the internal policy text itself. "
-                f"Please {asks[0]}, {asks[1]}, and {asks[2]}."
+                self._choose_nonrepetitive_lead([
+                    "I understand Lenovo will not share the internal policy text itself.",
+                    "I understand Lenovo will not provide the internal policy text itself.",
+                ])
+                + " "
+                + self._compose_follow_up_request(asks, max_items=2)
             )
         if state == "formal_denial_pending_case_status":
             return (
-                "Thank you for stating Lenovo's denial position. "
-                f"Please {asks[0]}, {asks[1]}, and {asks[2]}."
+                self._choose_nonrepetitive_lead([
+                    "Thank you for stating Lenovo's denial position.",
+                    "Thank you for stating Lenovo's final position.",
+                ])
+                + " "
+                + self._compose_follow_up_request(asks, max_items=2)
             )
         if state == "external_redirect_after_denial":
             return (
-                "I am not accepting a redirect away from Lenovo after Lenovo has already taken a denial position on this return. "
-                f"Please {asks[0]}, {asks[1]}, and {asks[2]}."
+                self._choose_nonrepetitive_lead([
+                    "I am not accepting a redirect away from Lenovo after Lenovo has already taken a denial position on this return.",
+                    "I am not accepting a redirect away from Lenovo after Lenovo already took a denial position on this return.",
+                ])
+                + " "
+                + self._compose_follow_up_request(asks, max_items=2)
             )
         if state == "closure_attempted_after_denial":
             return (
-                "I am not agreeing to close the chat while Lenovo's final position is still incomplete. "
-                f"Please {asks[0]}, {asks[1]}, and {asks[2]}."
+                self._choose_nonrepetitive_lead([
+                    "I am not agreeing to close the chat while Lenovo's final position is still incomplete.",
+                    "I am not agreeing to end the chat while Lenovo's final position is still incomplete.",
+                ])
+                + " "
+                + self._compose_follow_up_request(asks, max_items=2)
             )
         return ""
 
@@ -1049,13 +1080,13 @@ class CopilotSession:
             return asks
         if intent == "reviewing_case":
             asks.append("tell me what exact step you are reviewing")
-            asks.append("confirm what is still pending")
             asks.append("give the next update deadline before you return")
+            asks.append("confirm what is still pending")
             return asks
         if intent == "information_gathering_delay":
             asks.append("come back with the actual review result, not only a delay message")
-            asks.append("state whether Lenovo is treating this as a lost return, empty-box, or tampering review")
             asks.append("give the next concrete update deadline")
+            asks.append("state whether Lenovo is treating this as a lost return, empty-box, or tampering review")
             return asks
         if intent in {"hold_request", "keepalive"}:
             asks.append("tell me the exact next step and timeline")
@@ -1070,18 +1101,15 @@ class CopilotSession:
             return asks
         if intent == "lost_case_denied":
             asks.append("confirm whether this is Lenovo's final denial or whether the case is still under review")
-            asks.append("state the official denial basis in one clear summary")
-            asks.append("name the team or owner who made that denial decision")
+            asks.append("state the official denial basis in one clear summary and name the team or owner who made that denial decision")
             return asks
         if intent == "internal_policy_confidential":
             asks.append("provide Lenovo's official non-confidential summary of the denial basis")
-            asks.append("confirm who owns the final decision on the case")
-            asks.append("confirm whether the case is now closed or still under review")
+            asks.append("confirm who owns the final decision on the case and whether the case is now closed or still under review")
             return asks
         if intent == "denial_basis_summary_provided":
             asks.append("confirm whether that summary is Lenovo's final denial basis")
-            asks.append("confirm whether the case is now closed or still under review")
-            asks.append("name the final decision-maker or team")
+            asks.append("confirm whether the case is now closed or still under review and name the final decision-maker or team")
             return asks
         if intent == "closure_after_denial":
             asks.append("confirm whether Lenovo is closing the case or only closing the chat")
@@ -1090,13 +1118,12 @@ class CopilotSession:
             return asks
         if intent == "missing_product_after_delivery_claim":
             asks.append("state whether Lenovo is making an empty-box claim, a tampering claim, or another inspection finding")
-            asks.append("identify the team handling that review")
-            asks.append("give the written deadline for Lenovo's final refund decision")
+            asks.append("identify the team handling that review and give the written deadline for Lenovo's final refund decision")
             return asks
         if intent == "dropoff_location_claim":
             asks.append("state whether Lenovo is treating this as a lost return, a carrier misdelivery issue, or a fraud review")
-            asks.append("explain why Lenovo is withholding the refund when Lenovo's own UPS label and internal carrier review are involved")
             asks.append("name the team handling this review and give the exact deadline for Lenovo's refund decision")
+            asks.append("explain why Lenovo is withholding the refund when Lenovo's own UPS label and internal carrier review are involved")
             return asks
         contradiction_focus = self._active_contradiction_focus(agent_text=agent_text)
         if contradiction_focus:
@@ -1287,13 +1314,25 @@ class CopilotSession:
         wait_label = self._resume_wait_window_label()
         _, due_passed = self._follow_up_due_status()
         if self._has_submitted_ups_receipt():
-            parts.append("I already provided the UPS receipt Lenovo requested.")
+            parts.append(
+                self._choose_nonrepetitive_lead([
+                    "I already provided the UPS receipt Lenovo requested.",
+                    "I already sent the UPS receipt Lenovo asked for.",
+                ])
+            )
         if due_passed and wait_label:
-            parts.append(f"The {wait_label} window has already passed.")
-        parts.append(
-            f"Please confirm the current stage of {self.active_case_reference()}, explain exactly what step is still pending, identify the team currently handling it, and give the exact date of Lenovo's final refund decision."
-        )
-        return " ".join(parts)
+            parts.append(
+                self._choose_nonrepetitive_lead([
+                    f"The {wait_label} window has already passed.",
+                    f"The {wait_label} timeframe has already passed.",
+                ])
+            )
+        asks = [
+            f"confirm the current stage of {self.active_case_reference()}",
+            "explain exactly what step is still pending and give the exact date of Lenovo's final refund decision",
+        ]
+        parts.append(self._compose_follow_up_request(asks, max_items=2))
+        return " ".join(part for part in parts if part).strip()
 
     def _follow_up_opening_ask(self, due_passed=False):
         points = self._known_case_points()
@@ -3045,7 +3084,14 @@ Before answering, silently proofread the message for grammar and clarity."""
         if intent == "acknowledgement_only":
             if self._should_force_late_denial_follow_up(agent_text=agent_text):
                 return self._late_denial_follow_up_message(self._late_denial_state(agent_text=agent_text))
-            return "Understood. Please return with the actual decision or written basis."
+            return (
+                self._choose_nonrepetitive_lead(["Understood.", "All right.", "Okay."])
+                + " "
+                + self._compose_follow_up_request([
+                    "return with the actual decision",
+                    "state the written basis if the decision is negative",
+                ], max_items=1)
+            ).strip()
         if intent in {"status_update_preamble", "courtesy_greeting_preamble"}:
             return ""
         if intent == "agent_intro":
@@ -3057,17 +3103,29 @@ Before answering, silently proofread the message for grammar and clarity."""
                 return self._follow_up_opening_message()
             return (
                 f"I am following up on order {order}. "
-                "Please confirm the current case status, explain exactly what is still pending, and give the written deadline for completion."
+                + self._compose_follow_up_request([
+                    "confirm the current case status",
+                    "explain exactly what is still pending",
+                    "give the written deadline for completion",
+                ], max_items=2)
             )
         if intent == "reviewing_case":
             return (
                 "That's fine. "
-                "When you finish reviewing, please tell me what exact step you are checking, what is still pending, and the next update deadline."
+                + self._compose_follow_up_request([
+                    "tell me what exact step you are checking",
+                    "give the next update deadline",
+                    "confirm what is still pending",
+                ], max_items=2)
             )
         if intent == "information_gathering_delay":
             return (
                 "That's fine. "
-                "Please come back with the actual review result, tell me what review type Lenovo is using here, and give the next update deadline."
+                + self._compose_follow_up_request([
+                    "come back with the actual review result",
+                    "give the next update deadline",
+                    "tell me what review type Lenovo is using here",
+                ], max_items=2)
             )
         if self._explicit_field_request(agent_text, "email"):
             return f"The email on the order is {normalize_customer_email(self.customer_email)}."
@@ -3080,23 +3138,26 @@ Before answering, silently proofread the message for grammar and clarity."""
         if intent == "keepalive":
             return (
                 "Yes, I am still here. "
-                f"Please confirm whether {case_ref} has already been escalated and tell me the exact next step and timeline."
+                + self._compose_follow_up_request([
+                    f"confirm whether {case_ref} has already been escalated",
+                    "tell me the exact next step and timeline",
+                ], max_items=1)
             )
         if intent == "hold_request":
-            ask = next_asks[0] if next_asks else "tell me the exact next step and timeline"
+            ask = self._preferred_next_ask(next_asks) or "tell me the exact next step and timeline"
             ask = re.sub(r"^when you return,\s*", "", ask, flags=re.I)
             return (
                 "Yes, that's fine. "
                 f"When you return, please {ask}."
             )
         if intent == "closure_warning":
-            ask = next_asks[0] if next_asks else "confirm the refund status or the next update deadline"
+            ask = self._preferred_next_ask(next_asks) or "confirm the refund status or the next update deadline"
             return (
                 "I am still here. "
                 f"Before the chat closes, please {ask}."
             )
         if intent == "escalation_confirmed":
-            ask = next_asks[0] if next_asks else "confirm the written resolution timeline"
+            ask = self._preferred_next_ask(next_asks) or "confirm the written resolution timeline"
             return (
                 "Thank you for confirming the escalation. "
                 f"Please {ask} today."
@@ -3117,45 +3178,91 @@ Before answering, silently proofread the message for grammar and clarity."""
         if self._should_force_late_denial_follow_up(agent_text=agent_text):
             return self._late_denial_follow_up_message(self._late_denial_state(agent_text=agent_text))
         if intent in {"soft_stall", "generic_empathy"}:
-            ask = next_asks[0] if next_asks else "give me the specific next step and the timeline"
+            ask = self._preferred_next_ask(next_asks) or "give me the specific next step and the timeline"
             return (
-                "I need a concrete update rather than a general assurance. "
+                self._choose_nonrepetitive_lead([
+                    "I need a concrete update rather than a general assurance.",
+                    "I need a specific update rather than a general assurance.",
+                ])
+                + " "
                 f"Please {ask}."
             )
         if intent == "dropoff_location_claim":
             travel_explanation = self._dropoff_location_explanation()
             return (
                 f"{travel_explanation + ' ' if travel_explanation else ''}"
-                "This return used Lenovo's UPS label, so any drop-off or routing discrepancy must be handled between Lenovo and UPS internally. "
-                "Please confirm in writing whether Lenovo is treating this as a lost-return investigation, a carrier misdelivery issue, or a fraud review, name the team handling that review, and give the exact deadline for Lenovo's refund decision."
+                + self._choose_nonrepetitive_lead([
+                    "This return used Lenovo's UPS label, so any drop-off or routing discrepancy must be handled between Lenovo and UPS internally.",
+                    "This return used Lenovo's UPS label, so Lenovo should handle any drop-off or routing discrepancy with UPS internally.",
+                ])
+                + " "
+                + self._compose_follow_up_request([
+                    "confirm in writing whether Lenovo is treating this as a lost-return investigation, a carrier misdelivery issue, or a fraud review",
+                    "name the team handling that review and give the exact deadline for Lenovo's refund decision",
+                ], max_items=2)
             )
         if intent == "case_canceled_ups_redirect":
             travel_explanation = self._dropoff_location_explanation()
             return (
                 f"{travel_explanation + ' ' if travel_explanation else ''}"
-                "Canceling Lenovo's internal case does not transfer a Lenovo-labeled return to me. "
-                "Please reopen or re-escalate the case, confirm whether Lenovo is treating this as a lost-return, carrier misdelivery, or tampering review, and give the written deadline for Lenovo's final refund decision."
+                + self._choose_nonrepetitive_lead([
+                    "Canceling Lenovo's internal case does not transfer a Lenovo-labeled return to me.",
+                    "Closing Lenovo's internal case does not shift a Lenovo-labeled return back to me.",
+                ])
+                + " "
+                + self._compose_follow_up_request([
+                    "reopen or re-escalate the case",
+                    "confirm whether Lenovo is treating this as a lost-return, carrier misdelivery, or tampering review and give the written deadline for Lenovo's final refund decision",
+                ], max_items=2)
             )
         if intent == "lost_case_denied":
+            asks = [
+                f"confirm whether this is Lenovo's final denial on {case_ref}",
+                "state the official denial basis in one clear summary and confirm whether the case is now closed or still under review",
+            ]
             return (
-                "I understand Lenovo's position that the lost case was not approved. "
-                "Because this return used Lenovo's UPS label, I need Lenovo's final written position from Lenovo, not a redirect to UPS. "
-                f"Please confirm whether this is Lenovo's final denial on {case_ref}, state the official denial basis in one clear summary, name the team or owner who made that decision, and confirm whether the case is now closed or still under review."
+                self._choose_nonrepetitive_lead([
+                    "I understand Lenovo's position that the lost case was not approved.",
+                    "I understand Lenovo's position that the lost case was denied.",
+                ])
+                + " Because this return used Lenovo's UPS label, I need Lenovo's final written position from Lenovo, not a redirect to UPS. "
+                + self._compose_follow_up_request(asks, max_items=2)
             )
         if intent == "internal_policy_confidential":
             return (
-                "I understand Lenovo will not share the internal policy text. "
-                "Please provide Lenovo's official non-confidential summary of the denial basis, name the team or owner responsible for that decision, and confirm whether the case is now closed or still under review."
+                self._choose_nonrepetitive_lead([
+                    "I understand Lenovo will not share the internal policy text.",
+                    "I understand Lenovo will not provide the internal policy text.",
+                ])
+                + " "
+                + self._compose_follow_up_request([
+                    "provide Lenovo's official non-confidential summary of the denial basis",
+                    "name the team or owner responsible for that decision and confirm whether the case is now closed or still under review",
+                ], max_items=2)
             )
         if intent == "denial_basis_summary_provided":
             return (
-                "Thank you for stating Lenovo's position. "
-                "Please confirm whether that is Lenovo's final denial basis on this case, confirm whether the case is now closed or still under review, and name the team or owner responsible for the final decision."
+                self._choose_nonrepetitive_lead([
+                    "Thank you for stating Lenovo's position.",
+                    "Thank you for stating Lenovo's basis.",
+                ])
+                + " "
+                + self._compose_follow_up_request([
+                    "confirm whether that is Lenovo's final denial basis on this case",
+                    "confirm whether the case is now closed or still under review and name the team or owner responsible for the final decision",
+                ], max_items=2)
             )
         if intent == "missing_product_after_delivery_claim":
             return (
-                "You are acknowledging that the return package was delivered and then saying the item was missing during inspection. "
-                "Please confirm whether Lenovo is making an empty-box or tampering claim, identify the team handling that review, and give the written deadline for Lenovo's final refund decision."
+                self._choose_nonrepetitive_lead([
+                    "You are acknowledging that the return package was delivered and then saying the item was missing during inspection.",
+                    "Lenovo is acknowledging delivery of the return package and then saying the item was missing during inspection.",
+                ])
+                + " "
+                + self._compose_follow_up_request([
+                    "confirm whether Lenovo is making an empty-box or tampering claim",
+                    "identify the team handling that review and give the written deadline for Lenovo's final refund decision",
+                ], max_items=2)
             )
         if intent == "ups_redirect":
             travel_explanation = self._dropoff_location_explanation()
@@ -3175,11 +3282,18 @@ Before answering, silently proofread the message for grammar and clarity."""
             )
         if intent == "closure_after_denial":
             return (
-                "I am not agreeing to close the chat while Lenovo's final position is still incomplete. "
-                "Please confirm whether the case itself is now closed or still under review, state the official denial basis in one clear summary, and name the team or owner responsible for that final decision."
+                self._choose_nonrepetitive_lead([
+                    "I am not agreeing to close the chat while Lenovo's final position is still incomplete.",
+                    "I am not agreeing to end the chat while Lenovo's final position is still incomplete.",
+                ])
+                + " "
+                + self._compose_follow_up_request([
+                    "confirm whether the case itself is now closed or still under review",
+                    "state the official denial basis in one clear summary and name the team or owner responsible for that final decision",
+                ], max_items=2)
             )
         if intent == "closing_polite":
-            ask = next_asks[0] if next_asks else "confirm the next written update deadline"
+            ask = self._preferred_next_ask(next_asks) or "confirm the next written update deadline"
             return f"Before we end, please {ask}."
         if intent == "empty_box_claim":
             return (
@@ -3187,19 +3301,19 @@ Before answering, silently proofread the message for grammar and clarity."""
                 "If Lenovo is asserting an empty-box exception, please escalate this to the returns team today, provide the case ID, and confirm the written basis for withholding the refund."
             )
         if intent == "callback_later":
-            ask = next_asks[0] if next_asks else "confirm what exact step is still pending and who owns the follow-up"
+            ask = self._preferred_next_ask(next_asks) or "confirm what exact step is still pending and who owns the follow-up"
             return (
                 "Before I wait another 24-48 business hours, I need one specific update. "
                 f"Please {ask}."
             )
         if intent == "no_action_required":
-            ask = next_asks[0] if next_asks else "tell me what exact approval step is still pending"
+            ask = self._preferred_next_ask(next_asks) or "tell me what exact approval step is still pending"
             return (
                 "I understand you say there is nothing else for me to do. "
                 f"Please {ask} before I wait another 24-48 business hours."
             )
         if intent == "supervisor_same_resolution":
-            ask = next_asks[0] if next_asks else "tell me who can approve the refund and when that review will finish"
+            ask = self._preferred_next_ask(next_asks) or "tell me who can approve the refund and when that review will finish"
             return (
                 "If the supervisor cannot change the outcome, then I need the real decision-maker. "
                 f"Please {ask}."
@@ -3251,13 +3365,14 @@ Before answering, silently proofread the message for grammar and clarity."""
                 "Please confirm whether you will complete the full refund now or escalate this to the refunds team today with a case ID and timeline."
             )
         if pressure == "high":
-            ask = next_asks[0] if next_asks else "provide the exact deadline so I can preserve my dispute rights"
+            ask = self._preferred_next_ask(next_asks) or "provide the exact deadline so I can preserve my dispute rights"
             return (
                 f"I need a concrete resolution on order {order} today. "
                 f"If this remains unresolved, please {ask}."
             )
         if next_asks:
-            return f"I need one specific update on order {order}. Please {next_asks[0]}."
+            ask = self._preferred_next_ask(next_asks)
+            return f"I need one specific update on order {order}. Please {ask}."
         return (
             f"I need a concrete update on order {order}. "
             "Please confirm whether you can resolve this with a refund, replacement, or escalation today."
@@ -3490,6 +3605,87 @@ Before answering, silently proofread the message for grammar and clarity."""
                 break
         return list(reversed(replies))
 
+    def _ask_keywords(self, ask):
+        text = self._normalize_message(ask)
+        words = re.findall(r"[a-z]{4,}", text)
+        stop = {
+            "please", "confirm", "state", "identify", "explain", "provide", "given",
+            "give", "tell", "name", "case", "lenovo", "exact", "current", "still",
+            "final", "official", "written", "their", "that", "this", "with", "from",
+            "what", "when", "whether", "which", "here", "your", "they", "them",
+        }
+        deduped = []
+        for word in words:
+            if word in stop or word in deduped:
+                continue
+            deduped.append(word)
+        return deduped
+
+    def _ask_recently_used(self, ask, limit=3):
+        keywords = self._ask_keywords(ask)
+        if not keywords:
+            return False
+        for previous in self._recent_customer_replies(limit=limit):
+            prev = self._normalize_message(previous)
+            overlap = sum(1 for keyword in keywords if keyword in prev)
+            if overlap >= min(2, len(keywords)):
+                return True
+        return False
+
+    def _preferred_asks(self, asks, max_items=1):
+        cleaned = []
+        for ask in asks or []:
+            ask = (ask or "").strip().rstrip(".")
+            if ask and ask not in cleaned:
+                cleaned.append(ask)
+        if not cleaned:
+            return []
+        selected = []
+        for ask in cleaned:
+            if self._ask_recently_used(ask):
+                continue
+            selected.append(ask)
+            if len(selected) >= max_items:
+                return selected
+        for ask in cleaned:
+            if ask in selected:
+                continue
+            selected.append(ask)
+            if len(selected) >= max_items:
+                break
+        return selected
+
+    def _preferred_next_ask(self, asks):
+        preferred = self._preferred_asks(asks, max_items=1)
+        return preferred[0] if preferred else ""
+
+    def _compose_follow_up_request(self, asks, max_items=1):
+        selected = self._preferred_asks(asks, max_items=max_items)
+        if not selected:
+            return ""
+        if len(selected) == 1:
+            return f"Please {selected[0]}."
+        return f"Please {selected[0]}. Also {selected[1]}."
+
+    def _choose_nonrepetitive_lead(self, options, limit=3):
+        candidates = [(option or "").strip() for option in options or [] if (option or "").strip()]
+        if not candidates:
+            return ""
+        recent = []
+        for reply in self._recent_customer_replies(limit=limit):
+            first = re.split(r"(?<=[.!?])\s+", reply.strip())[0].strip()
+            if first:
+                recent.append(self._normalize_message(first))
+        for candidate in candidates:
+            normalized = self._normalize_message(candidate)
+            if not any(
+                prior == normalized
+                or difflib.SequenceMatcher(a=prior, b=normalized).ratio() >= 0.9
+                for prior in recent
+            ):
+                return candidate
+        return candidates[0]
+
     def _is_near_recent_customer_reply(self, text, limit=3, threshold=0.84):
         current = self._normalize_message(text)
         if not current or self.message_count < 3:
@@ -3505,51 +3701,121 @@ Before answering, silently proofread the message for grammar and clarity."""
         intent = self.infer_agent_intent(agent_text)
         if intent in {"acknowledgement_only", "information_gathering_delay", "reviewing_case", "hold_request"}:
             return (
-                "Understood. Please come back with the actual review result, the review type Lenovo is using here, and the next update deadline."
-            )
+                self._choose_nonrepetitive_lead(["Understood.", "All right.", "Okay."])
+                + " "
+                + self._compose_follow_up_request([
+                    "come back with the actual review result",
+                    "state the review type Lenovo is using here",
+                    "give the next update deadline",
+                ], max_items=2)
+            ).strip()
         if intent == "case_canceled_ups_redirect":
             travel_explanation = self._dropoff_location_explanation()
             return (
                 f"{travel_explanation + ' ' if travel_explanation else ''}"
-                "Canceling Lenovo's internal case does not transfer a Lenovo-labeled return to me. "
-                "Please reopen or re-escalate the case, confirm whether this is a lost-return, carrier misdelivery, or tampering review, and give the written deadline for Lenovo's final refund decision."
+                + self._choose_nonrepetitive_lead([
+                    "Canceling Lenovo's internal case does not transfer a Lenovo-labeled return to me.",
+                    "Closing Lenovo's internal case does not shift a Lenovo-labeled return back to me.",
+                ])
+                + " "
+                + self._compose_follow_up_request([
+                    "reopen or re-escalate the case",
+                    "confirm whether this is a lost-return, carrier misdelivery, or tampering review",
+                    "give the written deadline for Lenovo's final refund decision",
+                ], max_items=2)
             )
         if intent == "lost_case_denied":
             return (
-                "If Lenovo's position is that the lost case was not approved, then I need Lenovo's final written position. "
-                "Please confirm whether this is the final denial, state the denial basis in one clear summary, name the final decision-maker, and confirm whether the case itself is closed or still under review."
+                self._choose_nonrepetitive_lead([
+                    "If Lenovo's position is that the lost case was not approved, then I need Lenovo's final written position.",
+                    "If Lenovo is keeping the lost-case denial in place, then I need Lenovo's final position in writing.",
+                ])
+                + " "
+                + self._compose_follow_up_request([
+                    "confirm whether this is the final denial",
+                    "state the denial basis in one clear summary",
+                    "confirm whether the case itself is closed or still under review",
+                ], max_items=2)
             )
         if intent == "internal_policy_confidential":
             return (
-                "I understand Lenovo will not share the internal policy text. "
-                "Please give Lenovo's official non-confidential denial summary, name the final owner or team, and confirm whether the case is closed or still under review."
+                self._choose_nonrepetitive_lead([
+                    "I understand Lenovo will not share the internal policy text.",
+                    "I understand Lenovo will not provide the internal policy text itself.",
+                ])
+                + " "
+                + self._compose_follow_up_request([
+                    "give Lenovo's official non-confidential denial summary",
+                    "name the final owner or team",
+                    "confirm whether the case is closed or still under review",
+                ], max_items=2)
             )
         if intent == "denial_basis_summary_provided":
             return (
-                "Thank you for stating Lenovo's basis. "
-                "Please confirm whether that is the final denial basis, whether the case is closed or still under review, and who owns the final decision."
+                self._choose_nonrepetitive_lead([
+                    "Thank you for stating Lenovo's basis.",
+                    "Thank you for stating Lenovo's position.",
+                ])
+                + " "
+                + self._compose_follow_up_request([
+                    "confirm whether that is the final denial basis",
+                    "confirm whether the case is closed or still under review",
+                    "state who owns the final decision",
+                ], max_items=2)
             )
         if intent == "closure_after_denial":
             return (
-                "I am not agreeing to closure while Lenovo's final position is still incomplete. "
-                "Please confirm whether the case is closed or still under review, state the final denial basis clearly, and name the owner or team responsible for that decision."
+                self._choose_nonrepetitive_lead([
+                    "I am not agreeing to closure while Lenovo's final position is still incomplete.",
+                    "I am not agreeing to close this out while Lenovo's final position is still incomplete.",
+                ])
+                + " "
+                + self._compose_follow_up_request([
+                    "confirm whether the case is closed or still under review",
+                    "state the final denial basis clearly",
+                    "name the owner or team responsible for that decision",
+                ], max_items=2)
             )
         if intent == "missing_product_after_delivery_claim":
             return (
-                "You are acknowledging that the return package was delivered and then claiming the item was missing during inspection. "
-                "Please confirm whether Lenovo is treating this as an empty-box or tampering claim, identify the team handling that review, and give the written deadline for Lenovo's final refund decision."
+                self._choose_nonrepetitive_lead([
+                    "You are acknowledging that the return package was delivered and then claiming the item was missing during inspection.",
+                    "Lenovo is acknowledging delivery of the return package and then saying the item was missing during inspection.",
+                ])
+                + " "
+                + self._compose_follow_up_request([
+                    "confirm whether Lenovo is treating this as an empty-box or tampering claim",
+                    "identify the team handling that review",
+                    "give the written deadline for Lenovo's final refund decision",
+                ], max_items=2)
             )
         if intent in {"ups_redirect", "dropoff_location_claim"}:
             travel_explanation = self._dropoff_location_explanation()
             return (
                 f"{travel_explanation + ' ' if travel_explanation else ''}"
-                "Because this return used Lenovo's UPS label, Lenovo must keep the UPS review internal. "
-                "Please state the review type, name the team handling it, and give the deadline for Lenovo's final refund decision."
+                + self._choose_nonrepetitive_lead([
+                    "Because this return used Lenovo's UPS label, Lenovo must keep the UPS review internal.",
+                    "Because Lenovo issued the UPS label, Lenovo should keep the UPS review internal.",
+                ])
+                + " "
+                + self._compose_follow_up_request([
+                    "state the review type",
+                    "name the team handling it",
+                    "give the deadline for Lenovo's final refund decision",
+                ], max_items=2)
             )
         if intent in {"empty_box_claim", "warehouse_missing_claim"}:
             return (
-                "Your explanation still conflicts with the confirmed delivery record. "
-                "Please state whether Lenovo is making an empty-box, lost-return, or tampering claim, name the reviewing team, and give the written deadline for Lenovo's final decision."
+                self._choose_nonrepetitive_lead([
+                    "Your explanation still conflicts with the confirmed delivery record.",
+                    "That explanation still conflicts with the confirmed delivery record.",
+                ])
+                + " "
+                + self._compose_follow_up_request([
+                    "state whether Lenovo is making an empty-box, lost-return, or tampering claim",
+                    "name the reviewing team",
+                    "give the written deadline for Lenovo's final decision",
+                ], max_items=2)
             )
         contradiction_focus = self._active_contradiction_focus(agent_text=agent_text)
         if contradiction_focus:

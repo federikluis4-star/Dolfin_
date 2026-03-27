@@ -164,6 +164,32 @@ class DialogueRegressionTests(unittest.TestCase):
         self.assertIn("final refund decision", plan["message"])
         self.assertNotIn("written confirmation from your warehouse", plan["message"])
 
+    def test_case_stage_follow_up_changes_primary_ask_when_stage_was_already_requested(self):
+        session = self.make_session()
+        session.order_num = "4649951015"
+        session.latest_case_id = "C003879117"
+        session.follow_up_deadline = "5-7 business days"
+        session.follow_up_anchor_at = "2026-03-14T13:49:05-07:00"
+        session.details = "UPS receipt already sent."
+        session.operator_notes.append("The customer already sent the UPS receipt Lenovo requested after the prior chat.")
+        session.transcript.append(
+            {
+                "role": "customer_rep",
+                "content": (
+                    "I already provided the UPS receipt Lenovo requested. "
+                    "Please confirm the current stage of case ID C003879117 and what step is still pending."
+                ),
+                "ts": "2026-03-26T12:00:00Z",
+            }
+        )
+        session._sync_message_count_from_transcript()
+        msg = "Davinder\nAdvisor message\nI understand your concern and I appreciate your patience."
+        plan = session.plan_next_action(agent_text=msg, observation={"chat_ready": True}, first_turn=False)
+        self.assertEqual(session.infer_agent_intent(msg), "generic_empathy")
+        self.assertNotIn("current stage", plan["message"].lower())
+        self.assertIn("team handling the case", plan["message"].lower())
+        self.assertIn("final refund decision", plan["message"].lower())
+
     def test_dropoff_claim_is_handled_as_internal_lenovo_issue(self):
         session = self.make_session()
         msg = (
@@ -336,6 +362,21 @@ class DialogueRegressionTests(unittest.TestCase):
         self.assertIn("non-confidential", plan["message"])
         self.assertIn("denial basis", plan["message"])
         self.assertTrue("closed" in plan["message"] or "under review" in plan["message"])
+
+    def test_generic_empathy_avoids_reusing_same_opener_from_recent_reply(self):
+        session = self.make_session()
+        session.transcript.append(
+            {
+                "role": "customer_rep",
+                "content": "I need a concrete update rather than a general assurance. Please confirm the current status of the case.",
+                "ts": "2026-03-26T12:03:00Z",
+            }
+        )
+        session._sync_message_count_from_transcript()
+        msg = "Advisor message\nI understand your concern and appreciate your patience."
+        plan = session.plan_next_action(agent_text=msg, observation={"chat_ready": True}, first_turn=False)
+        self.assertEqual(session.infer_agent_intent(msg), "generic_empathy")
+        self.assertTrue(plan["message"].startswith("I need a specific update rather than a general assurance."))
 
     def test_denial_basis_summary_is_locked_instead_of_repeating_policy_bundle(self):
         session = self.make_session()

@@ -361,3 +361,16 @@ Document every meaningful runtime failure and mitigation.
   - Added `replay_transcripts.py` to print a readable pass/fail report for the current curated real-transcript scenarios.
 - Status:
   - Fixed in code; both `python3 -m unittest tests/test_dialogue_regressions.py tests/test_transcript_replays.py` and `python3 replay_transcripts.py` pass locally.
+
+## 2026-03-27 — Late-Stage Replies Still Sounded Template-Like Even When Logic Was Correct
+- Symptom:
+  - The bot could understand the right case stage but still answer with nearly the same opener and nearly the same first ask across multiple turns, which made it sound robotic and reduced pressure quality in live chats.
+- Cause:
+  - Fallback replies and contradiction / denial handlers mostly reused the first ask in a static bundle.
+  - The reply layer had no memory of which opener or which ask the bot had already used in the last few customer turns.
+- Mitigation:
+  - Added anti-template helpers that detect recently used asks and recently used lead sentences in the recent customer transcript.
+  - Switched key fallback, contradiction, late-denial, and overdue case-stage replies to choose a better non-repetitive ask and alternate lead when the last turn already used the obvious one.
+  - Added regression coverage to verify that repeated `current stage` asks rotate to the next missing point and that repeated `I need a concrete update...` openers change wording on the next turn.
+- Status:
+  - Fixed in code; `python3 -m unittest tests/test_dialogue_regressions.py tests/test_transcript_replays.py` now passes locally with 30 tests, and `python3 replay_transcripts.py` passes with 5 scenarios and 0 failures.

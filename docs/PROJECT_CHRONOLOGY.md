@@ -596,3 +596,15 @@ Use one entry per significant work block.
   - This closes the gap between narrow per-intent regression tests and full live observation.
 - Issues/Notes:
   - The current replay pack is intentionally curated and small; it should grow as more real transcript failures are discovered and stabilized into scenarios.
+
+- Scope: Reduce template-like wording by varying openers and rotating the primary ask instead of repeating the same escalation bundle.
+- Actions:
+  - Added reply helpers that detect recently used asks and recently used lead sentences from the latest customer-side transcript.
+  - Taught fallback replies, contradiction replies, late-denial replies, and overdue case-stage follow-ups to pick a better non-repetitive ask instead of blindly reusing the first ask in the bundle.
+  - Compressed several late-stage replies from three stacked demands into one or two sharper asks while preserving mandatory anchors like `final refund decision` and `closed vs under review`.
+  - Extended [tests/test_dialogue_regressions.py](/Users/lev/Downloads/support-agent/dolphin-bot/tests/test_dialogue_regressions.py) with anti-template coverage for reused openers and repeated case-stage asks.
+- Result:
+  - When the bot has already asked for `current stage`, later generic-empathy turns now pivot to the next missing point such as ownership or final decision date instead of asking the same thing again.
+  - Repeated openers like `I need a concrete update rather than a general assurance` now rotate to alternate phrasing, which makes live replies feel less mechanical.
+- Issues/Notes:
+  - This is still deterministic variation layered on heuristics, not full stylistic generation memory; the next likely improvement is broader replay coverage for late-stage denial transcripts with more varied operator phrasings.
