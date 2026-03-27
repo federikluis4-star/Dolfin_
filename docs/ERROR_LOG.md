@@ -349,3 +349,15 @@ Document every meaningful runtime failure and mitigation.
   - Added replay-style regression tests for real Lenovo denial progressions so the bot stays on final-denial handling even after softer later messages.
 - Status:
   - Fixed in code; `python3 -m unittest tests/test_dialogue_regressions.py` passes locally with the new late-denial replay coverage.
+
+## 2026-03-27 — We Needed A Real Transcript Replay Loop, Not Only Isolated Intent Tests
+- Symptom:
+  - The growing regression suite was good at catching individual phrasing failures, but it still did not give a single preflight signal for the real multi-step Lenovo paths we keep seeing in practice.
+- Cause:
+  - Existing tests were mostly per-intent and per-message. They did not provide an operator-readable replay report that could be run before a live session.
+- Mitigation:
+  - Added curated replay scenarios in `tests/replay_scenarios.py`.
+  - Added `tests/test_transcript_replays.py` so those scenarios also run in `unittest`.
+  - Added `replay_transcripts.py` to print a readable pass/fail report for the current curated real-transcript scenarios.
+- Status:
+  - Fixed in code; both `python3 -m unittest tests/test_dialogue_regressions.py tests/test_transcript_replays.py` and `python3 replay_transcripts.py` pass locally.

@@ -580,3 +580,19 @@ Use one entry per significant work block.
   - The bot now survives real denial progressions across multiple turns instead of only answering one denial sentence correctly in isolation.
 - Issues/Notes:
   - This state machine is tuned to observed Lenovo refund refusal flows first; the same approach can later be generalized to other merchants once more denial transcripts are available.
+
+- Scope: Add a reusable transcript replay runner for preflight checks before live launches.
+- Actions:
+  - Added curated replay scenarios in [tests/replay_scenarios.py](/Users/lev/Downloads/support-agent/dolphin-bot/tests/replay_scenarios.py) for real Lenovo failure patterns:
+    - overdue UPS-receipt follow-up
+    - wait-preamble handling
+    - delivery-vs-inspection contradiction pressure
+    - policy-confidential late denial persistence
+    - closure-after-denial persistence
+  - Added [tests/test_transcript_replays.py](/Users/lev/Downloads/support-agent/dolphin-bot/tests/test_transcript_replays.py) so those replay scenarios run under `unittest`.
+  - Added [replay_transcripts.py](/Users/lev/Downloads/support-agent/dolphin-bot/replay_transcripts.py) to print a readable pass/fail report for those scenarios outside the unit-test harness.
+- Result:
+  - We now have a repeatable preflight command that checks whether the bot still handles the most expensive real Lenovo dialogue paths correctly before a live practice run.
+  - This closes the gap between narrow per-intent regression tests and full live observation.
+- Issues/Notes:
+  - The current replay pack is intentionally curated and small; it should grow as more real transcript failures are discovered and stabilized into scenarios.
