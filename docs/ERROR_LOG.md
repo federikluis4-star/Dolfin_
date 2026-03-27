@@ -337,3 +337,15 @@ Document every meaningful runtime failure and mitigation.
   - Added regression tests to ensure generic empathy after those contradictions now produces an inconsistency-based follow-up instead of a softer generic reply.
 - Status:
   - Fixed in code; the local regression suite passes and the contradiction replay now yields a direct inconsistency challenge with review classification, owner, and final refund-decision date requests.
+
+## 2026-03-27 — Late Denial Logic Could Still Revert To Mid-Case Behavior On Later Turns
+- Symptom:
+  - After Lenovo had already taken a late-stage refusal posture (`lost case not approved`, `policy is internal and confidential`, `we will close this conversation`), a later generic operator turn or handoff could still make the bot behave as if the case were back in the middle of investigation instead of at final-denial handling.
+- Cause:
+  - Denial-specific intents existed, but there was no persistent state machine carrying that refusal posture across later generic or handoff-like turns.
+- Mitigation:
+  - Added a `late_denial_state` layer for formal denial, denial-basis withholding, denial-basis stated, external redirect after denial, and closure attempted after denial.
+  - Routed late-denial state into snapshot building, objective selection, best asks, fallback replies, and intent-address checks.
+  - Added replay-style regression tests for real Lenovo denial progressions so the bot stays on final-denial handling even after softer later messages.
+- Status:
+  - Fixed in code; `python3 -m unittest tests/test_dialogue_regressions.py` passes locally with the new late-denial replay coverage.

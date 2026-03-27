@@ -933,6 +933,106 @@ class CopilotSession:
             "general",
         }
 
+    def _late_denial_state(self, agent_text=""):
+        intent = self.infer_agent_intent(agent_text or self.last_agent_msg)
+        points = self._known_case_points(agent_text=agent_text)
+        claims_text = " ".join(self.operator_claims).lower()
+        if intent == "closure_after_denial" or "tried to close the chat after restating its denial" in claims_text:
+            return "closure_attempted_after_denial"
+        if intent in {"case_canceled_ups_redirect", "ups_redirect"} and (
+            points["final_denial_stated"]
+            or points["policy_confidential"]
+            or points["denial_basis_summary_provided"]
+            or "return package was delivered but the item was missing during inspection" in claims_text
+            or "warehouse did not receive the return" in claims_text
+        ):
+            return "external_redirect_after_denial"
+        if points["denial_basis_summary_provided"]:
+            return "formal_denial_pending_case_status"
+        if points["policy_confidential"]:
+            return "formal_denial_basis_withheld"
+        if points["final_denial_stated"]:
+            return "formal_denial_needs_basis"
+        return ""
+
+    def _late_denial_follow_up_asks(self, state):
+        if state == "formal_denial_needs_basis":
+            return [
+                "confirm whether this is Lenovo's final denial or whether the case is still under review",
+                "state the official denial basis in one clear summary",
+                "name the team or owner who made that denial decision",
+            ]
+        if state == "formal_denial_basis_withheld":
+            return [
+                "provide Lenovo's official non-confidential summary of the denial basis",
+                "confirm who owns the final decision on the case",
+                "confirm whether the case is now closed or still under review",
+            ]
+        if state == "formal_denial_pending_case_status":
+            return [
+                "confirm whether that is Lenovo's final denial basis",
+                "confirm whether the case is now closed or still under review",
+                "name the final decision-maker or team",
+            ]
+        if state == "external_redirect_after_denial":
+            return [
+                "confirm whether Lenovo is treating this as a lost-return, carrier misdelivery, or tampering review",
+                "state Lenovo's official final position instead of redirecting me away from Lenovo",
+                "identify the team handling that review and give the exact date of Lenovo's final refund decision",
+            ]
+        if state == "closure_attempted_after_denial":
+            return [
+                "confirm whether the case itself is now closed or still under review",
+                "state the final denial basis in one clear official summary",
+                "name the team or owner responsible for the final decision",
+            ]
+        return []
+
+    def _late_denial_follow_up_message(self, state):
+        asks = self._late_denial_follow_up_asks(state)
+        if state == "formal_denial_needs_basis":
+            return (
+                "Lenovo has already stated that the lost case was not approved. "
+                f"Please {asks[0]}, {asks[1]}, and {asks[2]}."
+            )
+        if state == "formal_denial_basis_withheld":
+            return (
+                "I understand Lenovo will not share the internal policy text itself. "
+                f"Please {asks[0]}, {asks[1]}, and {asks[2]}."
+            )
+        if state == "formal_denial_pending_case_status":
+            return (
+                "Thank you for stating Lenovo's denial position. "
+                f"Please {asks[0]}, {asks[1]}, and {asks[2]}."
+            )
+        if state == "external_redirect_after_denial":
+            return (
+                "I am not accepting a redirect away from Lenovo after Lenovo has already taken a denial position on this return. "
+                f"Please {asks[0]}, {asks[1]}, and {asks[2]}."
+            )
+        if state == "closure_attempted_after_denial":
+            return (
+                "I am not agreeing to close the chat while Lenovo's final position is still incomplete. "
+                f"Please {asks[0]}, {asks[1]}, and {asks[2]}."
+            )
+        return ""
+
+    def _should_force_late_denial_follow_up(self, agent_text=""):
+        state = self._late_denial_state(agent_text=agent_text)
+        if not state:
+            return False
+        intent = self.infer_agent_intent(agent_text or self.last_agent_msg)
+        return intent in {
+            "acknowledgement_only",
+            "agent_intro",
+            "soft_stall",
+            "generic_empathy",
+            "callback_later",
+            "no_action_required",
+            "transcript_offer",
+            "general",
+        }
+
     def next_best_asks(self, agent_text=""):
         intent = self.infer_agent_intent(agent_text or self.last_agent_msg)
         points = self._known_case_points(agent_text=agent_text)
@@ -1001,6 +1101,9 @@ class CopilotSession:
         contradiction_focus = self._active_contradiction_focus(agent_text=agent_text)
         if contradiction_focus:
             return self._contradiction_follow_up_asks(contradiction_focus)
+        late_denial_state = self._late_denial_state(agent_text=agent_text)
+        if late_denial_state:
+            return self._late_denial_follow_up_asks(late_denial_state)
         if self._needs_case_stage_follow_up():
             asks.append("confirm the current stage of the case")
             asks.append("explain exactly what step is still pending")
@@ -1404,6 +1507,7 @@ Before answering, silently proofread the message for grammar and clarity."""
             "resolved_points": self.resolved_points(current_agent_text),
             "next_best_asks": self.next_best_asks(current_agent_text),
             "dialogue_state": self.dialogue_state,
+            "late_denial_state": self._late_denial_state(current_agent_text),
             "unresolved_demands": self.unresolved_demands[-6:],
             "confirmed_facts": self.confirmed_facts[-8:],
             "operator_claims": self.operator_claims[-8:],
@@ -1858,6 +1962,9 @@ Before answering, silently proofread the message for grammar and clarity."""
             outline.append(f"Current merchant position: {self.latest_case_outcome}")
         elif self.last_agent_msg:
             outline.append(f"Latest merchant message: {self.last_agent_msg}")
+        late_denial_state = self._late_denial_state()
+        if late_denial_state:
+            outline.append(f"Late denial state: {late_denial_state}")
         if self.follow_up_deadline:
             outline.append(f"Current wait window: {self.follow_up_deadline}")
         return outline[:4]
@@ -2724,6 +2831,9 @@ Before answering, silently proofread the message for grammar and clarity."""
         contradiction_focus = self._active_contradiction_focus(agent_text=agent_text)
         if contradiction_focus:
             return "lock in Lenovo's inconsistency, force the exact review classification, the responsible team, and the final refund-decision date"
+        late_denial_state = self._late_denial_state(agent_text=agent_text)
+        if late_denial_state:
+            return "treat Lenovo's position as a late-stage denial, lock in the official basis, the decision owner, and whether the case is closed or still under review"
         if self._needs_case_stage_follow_up():
             return "because Lenovo already requested the UPS receipt and the promised window has passed, force the current case stage, exact pending step, current owner, and final refund-decision date"
         if self.dialogue_state == "case_opened_waiting":
@@ -2933,10 +3043,14 @@ Before answering, silently proofread the message for grammar and clarity."""
         if intent == "consumer_type_question":
             return "I am a retail consumer."
         if intent == "acknowledgement_only":
+            if self._should_force_late_denial_follow_up(agent_text=agent_text):
+                return self._late_denial_follow_up_message(self._late_denial_state(agent_text=agent_text))
             return "Understood. Please return with the actual decision or written basis."
         if intent in {"status_update_preamble", "courtesy_greeting_preamble"}:
             return ""
         if intent == "agent_intro":
+            if self._should_force_late_denial_follow_up(agent_text=agent_text):
+                return self._late_denial_follow_up_message(self._late_denial_state(agent_text=agent_text))
             if self._needs_case_stage_follow_up():
                 return self._case_stage_follow_up_message()
             if self._should_resume_existing_case():
@@ -3000,6 +3114,8 @@ Before answering, silently proofread the message for grammar and clarity."""
         contradiction_focus = self._active_contradiction_focus(agent_text=agent_text)
         if self._should_force_contradiction_follow_up(agent_text=agent_text):
             return self._contradiction_follow_up_message(contradiction_focus)
+        if self._should_force_late_denial_follow_up(agent_text=agent_text):
+            return self._late_denial_follow_up_message(self._late_denial_state(agent_text=agent_text))
         if intent in {"soft_stall", "generic_empathy"}:
             ask = next_asks[0] if next_asks else "give me the specific next step and the timeline"
             return (
@@ -3495,6 +3611,12 @@ Before answering, silently proofread the message for grammar and clarity."""
             return "before i wait" in msg or "pending" in msg or "approval" in msg or "inconsistent" in msg or "review type" in msg
         if intent == "callback_later":
             return "24-48" in msg or "owner" in msg or "pending" in msg or "update" in msg or "inconsistent" in msg or "review type" in msg
+        late_denial_state = self._late_denial_state(agent_text=agent_text)
+        if late_denial_state and intent in {"acknowledgement_only", "agent_intro", "soft_stall", "generic_empathy", "callback_later", "no_action_required", "transcript_offer", "general"}:
+            return (
+                ("denial basis" in msg or "final denial" in msg or "final position" in msg or "non-confidential" in msg or "not agreeing to close" in msg)
+                and ("closed" in msg or "under review" in msg or "owner" in msg or "team" in msg or "decision" in msg)
+            )
         if intent == "supervisor_same_resolution":
             return "decision-maker" in msg or "approve" in msg or "authority" in msg
         if intent == "policy_text_provided":

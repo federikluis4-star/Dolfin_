@@ -24,6 +24,12 @@ class DialogueRegressionTests(unittest.TestCase):
         session.latest_case_id = "C004094813"
         session.follow_up_deadline = "48 hours"
         session.follow_up_anchor_at = "2026-03-13T12:00:00-07:00"
+        session.latest_case_outcome = ""
+        session.dialogue_state = "active_negotiation"
+        session.operator_claims = []
+        session.confirmed_facts = []
+        session.unresolved_demands = []
+        session.contradictions = []
         session.operator_notes = []
         session.last_sent_msg = (
             "I am following up on case ID C004094813 for order 4649779458. "
@@ -280,6 +286,25 @@ class DialogueRegressionTests(unittest.TestCase):
         self.assertIn("denial basis", plan["message"])
         self.assertTrue("closed" in plan["message"] or "under review" in plan["message"])
 
+    def test_agent_intro_after_late_denial_keeps_final_denial_focus(self):
+        session = self.make_session()
+        session._update_case_memory("The lost case was not approved.", role="agent", persist=False)
+        session._update_case_memory(
+            "Please note that the policy being followed is internal and confidential, so we are unable to share it.",
+            role="agent",
+            persist=False,
+        )
+        msg = (
+            "Davinder\nAdvisor message\n"
+            "Thank you for contacting SMB Lenovo customer support! My name is Davinder, and I'll be assisting you today."
+        )
+        plan = session.plan_next_action(agent_text=msg, observation={"chat_ready": True}, first_turn=False)
+        self.assertEqual(session.infer_agent_intent(msg), "agent_intro")
+        self.assertEqual(plan["reason"], "deterministic_agent_intro")
+        self.assertIn("non-confidential", plan["message"])
+        self.assertIn("denial basis", plan["message"])
+        self.assertTrue("closed" in plan["message"] or "under review" in plan["message"])
+
     def test_internal_policy_confidential_requests_nonconfidential_summary_and_owner(self):
         session = self.make_session()
         msg = (
@@ -292,6 +317,25 @@ class DialogueRegressionTests(unittest.TestCase):
         self.assertIn("non-confidential", plan["message"])
         self.assertIn("denial basis", plan["message"])
         self.assertTrue("owner" in plan["message"] or "team" in plan["message"])
+
+    def test_generic_empathy_after_policy_confidential_keeps_late_denial_state(self):
+        session = self.make_session()
+        session._update_case_memory("The lost case was not approved.", role="agent", persist=False)
+        session._update_case_memory(
+            "Please note that the policy being followed is internal and confidential, so we are unable to share it.",
+            role="agent",
+            persist=False,
+        )
+        msg = (
+            "Anmol\nAdvisor message\n"
+            "I understand your concern and I appreciate your time."
+        )
+        plan = session.plan_next_action(agent_text=msg, observation={"chat_ready": True}, first_turn=False)
+        self.assertEqual(session.infer_agent_intent(msg), "generic_empathy")
+        self.assertEqual(plan["reason"], "deterministic_generic_empathy")
+        self.assertIn("non-confidential", plan["message"])
+        self.assertIn("denial basis", plan["message"])
+        self.assertTrue("closed" in plan["message"] or "under review" in plan["message"])
 
     def test_denial_basis_summary_is_locked_instead_of_repeating_policy_bundle(self):
         session = self.make_session()
@@ -307,6 +351,25 @@ class DialogueRegressionTests(unittest.TestCase):
         self.assertIn("final denial basis", plan["message"])
         self.assertTrue("closed" in plan["message"] or "under review" in plan["message"])
         self.assertTrue("owner" in plan["message"] or "team" in plan["message"])
+
+    def test_closure_attempt_after_denial_survives_generic_follow_up(self):
+        session = self.make_session()
+        session._update_case_memory(
+            "Your case was investigated by the NA Case Managers. Refunds are withheld if the investigation finds no return or loss confirmation.",
+            role="agent",
+            persist=False,
+        )
+        session._update_case_memory(
+            "As per policy, please note that the policy being followed is internal and confidential, so we are unable to share it. If you have no other questions, we will proceed and close this conversation.",
+            role="agent",
+            persist=False,
+        )
+        msg = "Anmol\nAdvisor message\nThank you."
+        plan = session.plan_next_action(agent_text=msg, observation={"chat_ready": True}, first_turn=False)
+        self.assertEqual(session.infer_agent_intent(msg), "acknowledgement_only")
+        self.assertEqual(plan["reason"], "deterministic_acknowledgement_only")
+        self.assertIn("not agreeing to close", plan["message"])
+        self.assertTrue("closed" in plan["message"] or "under review" in plan["message"])
 
     def test_closure_after_denial_rejects_case_closure_without_final_position(self):
         session = self.make_session()

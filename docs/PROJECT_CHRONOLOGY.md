@@ -569,3 +569,14 @@ Use one entry per significant work block.
   - Generic reassurance language no longer dilutes those late-stage contradictions into weaker `please give an update` replies.
 - Issues/Notes:
   - The contradiction router is intentionally focused on observed Lenovo refund patterns first; the next iteration should generalize the same pressure logic across more merchants once enough transcripts are collected.
+
+- Scope: Add a persistent late-denial state machine and replay-hardening for real Lenovo refusal sequences.
+- Actions:
+  - Added a `late_denial_state` layer that persists `formal denial`, `policy confidential`, `denial basis stated`, `external redirect after denial`, and `closure attempted after denial` across later operator turns.
+  - Wired that state into `build_case_snapshot()`, `current_objective()`, `next_best_asks()`, and reply fallback selection so the bot no longer falls back to mid-case asks after Lenovo has already taken a final-position posture.
+  - Added replay-style regression coverage for real Lenovo denial progressions: new-operator handoff after denial, generic empathy after `policy is internal and confidential`, and closure attempts after denial.
+- Result:
+  - Late-stage refusal cases now stay anchored to `final denial basis / owner / closed vs under review` even when Lenovo switches to softer or more generic follow-up wording.
+  - The bot now survives real denial progressions across multiple turns instead of only answering one denial sentence correctly in isolation.
+- Issues/Notes:
+  - This state machine is tuned to observed Lenovo refund refusal flows first; the same approach can later be generalized to other merchants once more denial transcripts are available.
